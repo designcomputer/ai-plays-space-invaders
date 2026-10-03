@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections import deque
 from dataclasses import dataclass
 
 from playwright.sync_api import Page, sync_playwright
@@ -40,6 +41,13 @@ SHIELD_COLS = 24
 TILE_PX = 4  # pixelSize = tileSize * 4
 SHIELD_H = SHIELD_ROWS * TILE_PX  # 64px
 MISSILE_SPEED = 750.0  # player bullet speed, px/s
+# Heuristic buffer before the game's instant-loss "invaders reach the bottom"
+# line (we don't have the exact threshold from source, since it's not
+# included in this standalone copy) — prioritize a column once its lowest
+# invader crosses this, overriding score/descent strategy entirely. y
+# increases downward (toward the cannon at CANNON_Y), so this must be well
+# above SHIELD_Y's far side (832) to leave real reaction time.
+INVADER_DANGER_Y = 800.0
 
 
 def norm(x: float) -> int:
@@ -239,9 +247,12 @@ class KorovaAgent:
             tags.append('open' if reach else 'BLOCKED')
             if cover:
                 tags.append('cover')
+            if lowest["y"] >= SHIELD_Y:
+                tags.append('LOW')
             targets[f"c{nx}"] = {"x": nx, "cx": x, "reachable": reach,
-                                 "cover": cover, "depth": depth,
-                                 "label": f"col x={nx} {depth} deep ({'/'.join(tags)})"}
+                                 "cover": cover, "depth": depth, "lowest_y": lowest["y"],
+                                 "label": f"col x={nx} {depth} deep, lowest_y={round(lowest['y'])} "
+                                          f"({'/'.join(tags)})"}
         if st.get("ufo"):
             nx = norm(st["ufo"]["x"])
             targets["ufo"] = {"x": nx, "cx": st["ufo"]["x"], "depth": 0,
@@ -307,8 +318,14 @@ class KorovaAgent:
                     "fleet and slow its descent — this buys survival time. "
                     "Columns tagged 'cover' have a bunker beneath them (safe "
                     "from enemy fire); PREFER covered outer columns, since the "
-                    "bare edges are exposed. Once few columns remain, weigh "
-                    "value vs. distance: each column's label shows how many "
+                    "bare edges are exposed. BOTTOM ROW: each column's label "
+                    "shows lowest_y, how close its nearest invader is to the "
+                    "bottom of the screen (higher = closer = more dangerous); "
+                    "columns tagged 'LOW' are nearing the bottom and should be "
+                    "prioritized over value/distance/descent-strategy, since "
+                    "an invader reaching the bottom is instant game over. "
+                    "Once few columns remain (and none are LOW), weigh value "
+                    "vs. distance: each column's label shows how many "
                     "invaders deep it is (more deep = more remaining points, "
                     "cleared bottom-to-top). Bunkers BLOCK most shots: "
                     "reachable_columns get through, blocked_columns waste the "
@@ -379,13 +396,19 @@ class KorovaAgent:
         # Narrow fleet (or aggressive enough to skip descent-slowing): score by
         # remaining value vs. travel cost. Survival-leaning settings stay
         # nearest-column (as before); score-leaning settings reach further for
-        # a deeper, richer column.
+        # a deeper, richer column. URGENCY (how close the column's lowest
+        # invader is to the danger line) is weighted heavily so a column
+        # nearing the bottom gets prioritized well before the hard override
+        # in play() would kick in — not just "clear the bottom row" once it's
+        # almost too late.
         def score(k: str) -> float:
             v = pool[k]
             value = v.get("depth", 0) / 4.0  # normalize (max column depth ~4-5)
             dist_cost = abs(v["x"] - cx) / 100.0
             cover_bonus = 0.1 if v.get("cover") else 0.0
-            return eff_aggression * value - (1.0 - 0.5 * eff_aggression) * dist_cost + cover_bonus
+            urgency = max(0.0, (v.get("lowest_y", 0) - SHIELD_Y) / (INVADER_DANGER_Y - SHIELD_Y))
+            return (eff_aggression * value - (1.0 - 0.5 * eff_aggression) * dist_cost
+                    + cover_bonus + 1.5 * urgency)
 
         return max(pool, key=score)
 
@@ -396,26 +419,41 @@ class KorovaAgent:
             return True
         return False
 
-    def _aim_at(self, target_key: str, duration: float) -> int:
+    def _aim_at(self, target_key: str, duration: float, force_fire: bool = False) -> int:
         """Move cannon toward the live x of `target_key`, firing throughout.
         Re-reads the target's current x each iteration (the fleet drifts).
 
-        LEADING THE UFO: the UFO moves at roughly 2x the cannon's speed, and
-        a bullet takes ~1s to reach its altitude (CANNON_Y to the UFO's y at
-        750px/s) — by the time a bullet fired at the UFO's CURRENT x arrives,
-        the UFO has moved several hundred pixels further and the shot misses
-        clean. The game exposes the UFO's exact velocity as `ufo.speed`
-        (constant while it's out), so we use that directly rather than
-        numerically differencing sampled positions — single-tick position
-        deltas are tiny (~2-3px) relative to the timing jitter of a
-        page.evaluate() round trip, so a differenced estimate swings wildly
-        tick to tick. Invader columns don't need leading (they drift slowly),
-        so this only applies when target_key == "ufo".
+        force_fire=True skips the reachability gate on firing (still requires
+        alignment) — used for the bottom-row emergency override in play(): if
+        a dangerously-low invader's only path is through a bunker, shooting
+        the bunker to erode it is strictly better than holding fire.
+
+        DRIFT-TOLERANT KEY RESOLUTION: a column's key (e.g. "c42") is derived
+        from its rounded normalized x, so drift across a rounding boundary
+        mid-chunk renames the key — a plain dict lookup would then see
+        "target gone" and bail out, right when the fleet is drifting fastest
+        (e.g. the moment it reverses direction off a screen edge). Instead we
+        track the target by physical x and re-resolve to the nearest column
+        if the exact key disappears.
+
+        LEADING THE TARGET: the UFO moves at roughly 2x the cannon's speed,
+        and even the fleet's slower drift adds up over a bullet's ~1s flight
+        to a tall column's lowest invader — especially right as the fleet
+        reverses direction mid-flight — so a shot aimed at the target's
+        CURRENT x can miss. We lead both: the UFO exposes its exact velocity
+        as `ufo.speed` (used directly — numerically differencing sampled
+        positions was tried first and was too noisy, since per-tick position
+        deltas are tiny relative to page.evaluate() round-trip jitter); the
+        fleet doesn't expose a velocity field and moves in discrete steps
+        rather than continuously, so we estimate it from a short rolling
+        window of samples (noisy single-tick deltas average out).
 
         Returns the number of real missiles launched."""
         fired = 0
         had_missile = False
         key = None
+        last_cx: float | None = None  # physical x of the target, across key renames
+        fleet_hist: deque[tuple[float, float]] = deque(maxlen=12)  # (t, x), ~240ms window
         end = time.time() + duration
         while time.time() < end:
             st = self._state()
@@ -442,12 +480,20 @@ class KorovaAgent:
                 time.sleep(0.02)
                 continue
 
-            # live target x (it may have drifted since we last looked)
-            tgt = self._targets(st).get(target_key)
+            # live target (it may have drifted since we last looked)
+            all_targets = self._targets(st)
+            tgt = all_targets.get(target_key)
+            if tgt is None and target_key != "ufo" and last_cx is not None:
+                _, near_v = min(
+                    ((k, v) for k, v in all_targets.items() if k != "ufo"),
+                    key=lambda kv: abs(kv[1]["cx"] - last_cx), default=(None, None))
+                if near_v is not None and abs(near_v["cx"] - last_cx) <= 16:
+                    tgt = near_v
             if tgt is None:
-                break  # target gone
+                break  # target really gone (cleared, or drifted too far to be the same column)
+            last_cx = tgt["cx"]
 
-            aim_cx = tgt["cx"]  # left-edge x to aim at (lead-adjusted for the UFO below)
+            aim_cx = tgt["cx"]  # left-edge x to aim at (lead-adjusted below)
             half_w = 16.0  # invaders are 32px wide
             reachable = tgt.get("reachable", True)
             ufo = st.get("ufo")
@@ -460,6 +506,14 @@ class KorovaAgent:
                 # where the bullet will actually cross the bunker band and
                 # fleet (a surviving invader there intercepts it too).
                 reachable = self._ufo_reachable_x(st, aim_cx)
+            else:
+                now = time.time()
+                fleet_hist.append((now, tgt["cx"]))
+                t0, x0 = fleet_hist[0]
+                vel = (tgt["cx"] - x0) / (now - t0) if now - t0 > 0.05 else 0.0
+                lead_time = max(0.0, CANNON_Y - tgt.get("lowest_y", CANNON_Y)) / MISSILE_SPEED
+                aim_cx = tgt["cx"] + vel * lead_time
+                reachable = self._reachable_x(st, aim_cx)
 
             # The missile fires from cannon.x+32 (cannon center). Align the
             # cannon center to the target's center: cannon.x = target_left - half_w.
@@ -480,7 +534,7 @@ class KorovaAgent:
             # reachable. One bullet at a time, and a misaligned/blocked shot
             # takes ~1s to clear the top or just hits the bunker — don't
             # waste it.
-            if aligned and not st.get("missile") and reachable:
+            if aligned and not st.get("missile") and (reachable or force_fire):
                 self.page.keyboard.press("Space")
             if st.get("missile") and not had_missile:
                 fired += 1
@@ -515,6 +569,17 @@ class KorovaAgent:
             DRIFT_TOL = 10  # norm-x units
             cols = {k: v for k, v in targets.items() if k != "ufo"}
 
+            # 0) BOTTOM ROW: a column whose lowest invader has crossed the
+            # danger line overrides everything else (score, UFO, descent
+            # strategy) — letting it reach the bottom is instant game over.
+            # Deliberately NOT gated on reachable: if the only path to a
+            # dangerously-low invader is through a bunker, shooting the
+            # bunker (force_fire below) is strictly better than ignoring the
+            # threat — each hit erodes the bunker tiles and may open a path
+            # (or kill the invader directly) before it's too late.
+            urgent = {k: v for k, v in cols.items() if v.get("lowest_y", 0) >= INVADER_DANGER_Y}
+            force_fire = False
+
             # 1) UFO is high-value (50-300pts): track it the whole time it's
             # out, not only once it's clear of a bunker. The UFO crosses the
             # full screen in a couple seconds and often transits a bunker's
@@ -523,7 +588,10 @@ class KorovaAgent:
             # it flew off-screen. Firing is still gated on reachability (see
             # _aim_at), so this just means the cannon is already aligned the
             # instant a gap opens.
-            if cs["ufo_out"]:
+            if urgent:
+                self._current_target = max(urgent, key=lambda k: urgent[k]["lowest_y"])
+                force_fire = True
+            elif cs["ufo_out"]:
                 self._current_target = "ufo"
             else:
                 # 2) Keep the current focus column if it's still valid.
@@ -553,7 +621,7 @@ class KorovaAgent:
             # Aim at the current target for a chunk (long enough to align +
             # fire, short enough to react to threats). Re-decide next chunk.
             if self._current_target in targets:
-                result.shots += self._aim_at(self._current_target, 0.5)
+                result.shots += self._aim_at(self._current_target, 0.5, force_fire=force_fire)
             else:
                 self._reflex_fire(st)
 

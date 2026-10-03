@@ -120,6 +120,31 @@ a handful of times per game (~14 in a 2-minute run).
   bottom edge sits only ~32px above the cannon, so there's little margin once
   a missile clears the bunkers — the dodge triggers earlier, while the
   missile is still well above the shields (`dodge_trigger_y`, default y=600).
+- **Direction-switch tracking** — a column's key (e.g. `c42`) is derived from
+  its rounded normalized x, so drift across a rounding boundary mid-aim
+  renames the key. A naive lookup would then see "target gone" and bail out
+  — most often right as the fleet reverses direction at a screen edge, since
+  that's when it's drifting fastest. The agent instead tracks the target by
+  physical x and re-resolves to the nearest column if the exact key
+  disappears (observed firing ~180x more often than a genuine "column
+  cleared" event in a 90s run).
+- **Fleet lead prediction** — a bullet can take real time to reach a tall
+  column's lowest invader, during which the whole fleet keeps drifting (or
+  reverses direction). The agent estimates the fleet's velocity from a short
+  rolling window of samples (it moves in discrete steps, not continuously, so
+  a single-tick delta is too noisy) and aims at the column's predicted
+  position at bullet-arrival time, not its current one.
+- **Bottom-row urgency** — a column whose lowest invader crosses
+  `INVADER_DANGER_Y` (default y=800, heuristic — the exact instant-loss
+  threshold isn't available in this standalone copy) overrides score, UFO,
+  and descent strategy entirely: reaching the bottom is instant game over
+  regardless of lives remaining. This override isn't gated on bunker
+  reachability — if the only path to a dangerously-low invader is through a
+  bunker, the agent force-fires through it anyway (eroding the bunker tiles
+  is strictly better than holding fire and losing). Columns also get a
+  softer, continuous urgency bonus in the normal value-scoring well before
+  they cross that hard line, so "clear the bottom row" is a standing
+  preference, not just a last-second panic response.
 - **Aggression knob** (`aggression=0.0..1.0`, default 0.5) — tunes the
   score/survival tradeoff from the baseline's "Known tradeoff" below. Higher
   aggression raises the fleet-width threshold before the agent commits to the
