@@ -130,6 +130,7 @@ server-side error (`non-finite logit`) on every request on the test server.
 
 ## Credits
 
-Space Invaders was written by Neil Kendall, who also owns the website
-[korovatron.co.uk](https://www.korovatron.co.uk/spaceinvaders/) where the game is played. This project only plays the game and does not include or
+Space Invaders was originally created by Tomohiro Nishikado at Taito (1978).
+This browser version was written by Neil Kendall, who owns the website
+[korovatron.co.uk](https://www.korovatron.co.uk/spaceinvaders/) where it is played. This project only plays the game and does not include or
 redistribute its code or assets. Please visit the site and support the author's work.
