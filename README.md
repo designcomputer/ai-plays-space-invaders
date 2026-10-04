@@ -1,183 +1,113 @@
-# ai_invaders — Jev-style Space Invaders agent (korovatron)
+# AI Plays Space Invaders
 
-A real-time browser-game agent in the **Jev / System One** style: a small
-decision model makes a few high-level *constrained* choices (which column to
-focus on), while a deterministic Python loop does the fast observe→aim→fire
-work. It plays [korovatron.co.uk's Space Invaders](https://www.korovatron.co.uk/spaceinvaders/).
+An AI agent that plays [korovatron.co.uk's Space Invaders](https://www.korovatron.co.uk/spaceinvaders/)
+in a real browser. A small language model makes high-level decisions (which
+column to focus on), while deterministic code handles the fast work of aiming,
+firing, and dodging.
 
-This is a **self-contained runnable copy** of the agent from the larger
-`~/ai_browser` project (only the files needed to run are here).
+## Quick start
 
-## Run it
+Requirements: Python 3.11+, and a [System One](#decision-model)-compatible
+model server (Ollama-style endpoint). Optional: `ffmpeg` on your PATH for
+`--record`.
 
 ```bash
-python example_korova.py                       # model policy, headed, 60s (watch it play)
-python example_korova.py --seconds 120          # longer run
-python example_korova.py --baseline             # deterministic policy (no model)
-python example_korova.py --headless             # no visible browser window
-python example_korova.py --aggression 0.9       # score-chasing (default 0.5)
-python example_korova.py --aggression 0.0       # pure survival
+pip install playwright requests
+python -m playwright install chromium
+
+# point at your model server (default: http://localhost:11434)
+export SYSTEMONE_BASE_URL=http://localhost:11434    # PowerShell: $env:SYSTEMONE_BASE_URL="..."
+
+python play_demo.py                         # watch the AI play in a visible window
 ```
 
-Programmatic:
+## Demo options
 
-```python
-from invaders_korova import KorovaAgent
-with KorovaAgent(headless=False, policy="model", model="clef:27b",
-                  aggression=0.5) as agent:
-    r = agent.play(seconds=60)   # r.score, r.lives, r.shots, r.model_calls, r.error
+```bash
+python play_demo.py                          # model policy, headed, 60s
+python play_demo.py --seconds 300            # longer run (ends early on game over)
+python play_demo.py --model nimble:9b        # choose the decision model
+python play_demo.py --aggression 0.9         # score-chasing (default 0.5; 0.0 = pure survival)
+python play_demo.py --baseline               # deterministic policy, no model server needed
+python play_demo.py --headless               # no visible window
+python play_demo.py --record game.mp4        # save the session as mp4 (needs ffmpeg)
 ```
+
+Video is captured silently. Playwright records only frames; to include game
+audio, record the window with a system tool (e.g. Windows Game Bar,
+`Win+Alt+R`) while the demo runs.
+
+## How it works
+
+```
+OBSERVE  read game state from JavaScript globals (no pixel analysis)
+DECIDE   the model picks ONE column to focus on, from options we offer it
+AIM      deterministic: align the cannon, leading moving targets
+FIRE     deterministic: fire when aligned, the path is clear, and no shot is in flight
+DODGE    deterministic: break off aiming when an enemy missile is on course
+```
+
+The model only chooses among columns the code offers, so its output is always
+a valid target. Most turns the model is not consulted at all: the agent keeps
+its current column until it is cleared, blocked, or threatened.
+
+### Strategy
+
+- **Focus fire.** A bullet hits the lowest invader in a column first, so the
+  agent clears columns bottom-to-top.
+- **Bunker awareness.** Four destructible bunkers block shots. Each column is
+  marked reachable or blocked, and the agent prefers reachable ones.
+- **Slow the descent.** While the fleet is wide, clear the outer columns first.
+  The fleet drops a row each time it bounces off a screen edge, so shrinking
+  its width buys time. Covered outer columns (with a bunker beneath) are
+  preferred.
+- **Bottom-row urgency.** A column whose lowest invader nears the bottom
+  overrides everything else, since reaching the bottom ends the game. The agent
+  will fire through a bunker if that is the only path.
+- **UFO.** Tracked as soon as it appears. Fired on only when a shot can reach it:
+  no bunker and no surviving invader in the way. Lead is computed from the
+  UFO's exposed velocity, so the shot lands where the UFO will be.
+- **Fleet lead.** A bullet takes real time to reach a tall column, and the fleet
+  drifts or reverses during that flight. The agent estimates fleet velocity from
+  recent samples and aims at the predicted position.
+- **Drift-tolerant tracking.** A column's identity can change as it drifts. The
+  agent tracks the target by physical position, so a rename does not look like a
+  cleared column.
+- **Reactive dodge.** Checked every 20 ms, not once per decision. Missiles
+  inside the danger band trigger an immediate move.
+- **Aggression.** `aggression` in [0, 1] trades safety for score. Effective
+  aggression scales down with remaining lives, so the agent plays safe on its
+  last life.
+
+## Decision model
+
+The model is reached through a System One endpoint (`POST /v1/systemone`).
+`systemone.py` is a small client for it. Model choice is set with `--model`
+or `SpaceInvadersAgent(model=...)`.
+
+Models tested on a local server, five runs each, 300s cap, default aggression:
+
+| Model | Mean score | Range | Mean lives left | Model calls / game |
+|---|---|---|---|---|
+| clef:27b | 1082 | 770–1290 | 2.2 | ~37 |
+| tev1:4b | 894 | 740–1170 | 2.8 | ~78 |
+| nimble:9b | 922 | 580–1310 | 2.8 | ~41 |
+
+Small samples; treat these as a rough guide. `clef-flash:9b` returned a
+server-side error (`non-finite logit`) on every request on the test server.
 
 ## Files
 
 | File | Purpose |
-|------|---------|
-| `invaders_korova.py` | The agent: observe (JS globals) → decide (System One) → act (deterministic aim/fire). |
-| `example_korova.py` | CLI demo (headed by default). |
-| `systemone.py` | The System One decision-API client (`systemone(model, state, questions, ...)`). Untouched dependency. |
+|---|---|
+| `space_invaders_agent.py` | The agent: observe, decide, aim, fire, dodge. |
+| `play_demo.py` | Command-line demo. Headed by default. |
+| `systemone.py` | Minimal client for the System One decision endpoint. |
 
-External deps (already installed in system Python): `playwright` (+ Chromium), `requests`.
+## Notes and limitations
 
-## Configuration
-
-- **Decision endpoint**: `http://sriai:11434` (Ollama). Override with the
-  `SYSTEMONE_BASE_URL` env var or `KorovaAgent(base_url=...)`.
-- **Default model**: `clef:27b` (beats `tev1:4b` on score + survival; ~2.6×
-  slower per call, 240ms vs 92ms, but the agent only calls it a handful of
-  times per game). Swap with `KorovaAgent(model="tev1:4b")`.
-- Other models on the server: `tev1:0.8b`, `nimble:9b`, `clef-flash:9b`,
-  `granite4.2:30b`, `qwen3.6:35b`, etc.
-
-## How it works
-
-The korovatron game is **canvas-based**, but it exposes its full state as
-**JavaScript globals**, so the agent reads state directly from JS (no canvas
-pixel analysis). One `page.evaluate()` call reads:
-
-- `gameState` (0=title, 1=playing, 1.5=lost life, 2=game over), `score`, `lives`
-- `cannon.x` (cannon left edge; center = x+32; y=864)
-- `fleet` — invaders `{x, y, type}` (type A=10pt, B=20pt, C=30pt)
-- `activeMissile` (player bullet), `invaderMissiles` (enemy bullets)
-- `shields` — 4 destructible bunkers `{x, cols[]}` (per-column open/blocked)
-- `ufo` — mystery ship `{x, y}` when active
-
-**Controls**: ArrowLeft/ArrowRight move the cannon (200 px/s), Space fires
-(one bullet at a time, 750 px/s). Canvas is 896×1024.
-
-### Architecture (constrained decision, not open-ended generation)
-
-```
-OBSERVE  read JS globals + compute per-column bunker reachability & cover
-DECIDE   System One picks ONE column to focus on (or the UFO). The model only
-         names a column we offered — the "model names an index we offered" pattern
-AIM      deterministic: move the cannon so its center aligns with the column
-         (missile fires from cannon.x+32; invader center is x+16)
-REFLEX   deterministic: fire only when aligned and no bullet is active
-```
-
-**Target persistence** (drift-tolerant) keeps the focused column until it's
-cleared, a UFO appears, or a missile threatens — so the model is only re-asked
-a handful of times per game (~14 in a 2-minute run).
-
-## Strategies implemented (verified against the game source)
-
-- **Focus fire** — a bullet hits the *lowest* invader in a column first, so the
-  agent clears one column bottom-to-top (10→20→20→30 = 90pts/col), then moves on.
-- **Bunker reachability** — the 4 destructible bunkers block most upward shots.
-  For each column the agent computes whether there's a clear vertical path
-  through the bunker band, and prefers reachable columns (the map updates live
-  as bunkers are broken open).
-- **Slow the descent (outer columns)** — the fleet drops a row each time it
-  bounces off a screen edge, bouncing off its *outermost surviving* column.
-  While the fleet is wide, clear the **outer columns first** to shrink it and
-  slow the descent (survival).
-- **Cover awareness** — the bare screen edges have no bunker, so the agent
-  prefers *covered* outer columns (a bunker beneath blocks enemy fire).
-- **Precision fire** — only fire when aligned; a misaligned shot takes ~1s to
-  clear the top.
-- **UFO priority** — worth 50–300pts (random in this version), tracked
-  continuously the instant it appears (not only once a clear shot is open —
-  see below), with firing gated on three live conditions:
-  1. **Bunker reachability** at the predicted aim point (below).
-  2. **Fleet occlusion** — the UFO flies above the whole fleet, so *any*
-     surviving invader in that column intercepts the shot long before it
-     reaches the UFO. This was the dominant reason UFO shots used to whiff:
-     the agent would fire, align, lead correctly, and still just hit a
-     regular invader passing underneath. Early in a game, when nearly every
-     column still has invaders, few UFO shots will connect — that's
-     expected, not a bug; it gets easier as the fleet thins out.
-  3. **Lead prediction** — the UFO moves at ~2x the cannon's speed, and a
-     bullet takes ~1s to reach its altitude, so a shot aimed at its *current*
-     x misses by hundreds of pixels. The game exposes the UFO's exact
-     velocity as `ufo.speed` (used directly — numerically differencing
-     sampled positions was tried first and was too noisy, since per-tick
-     position deltas are tiny relative to `page.evaluate()` round-trip
-     jitter). The agent computes time-to-altitude from `(cannon_y - ufo_y) /
-     missile_speed` and aims at the UFO's predicted position at that time.
-- **Reactive dodge** — `_aim_at` checks for an incoming enemy missile on the
-  cannon's *current* x every 20ms tick (not just once per ~0.5s decision
-  chunk) and breaks off aiming immediately to move clear. The shield band's
-  bottom edge sits only ~32px above the cannon, so there's little margin once
-  a missile clears the bunkers — the dodge triggers earlier, while the
-  missile is still well above the shields (`dodge_trigger_y`, default y=600).
-- **Direction-switch tracking** — a column's key (e.g. `c42`) is derived from
-  its rounded normalized x, so drift across a rounding boundary mid-aim
-  renames the key. A naive lookup would then see "target gone" and bail out
-  — most often right as the fleet reverses direction at a screen edge, since
-  that's when it's drifting fastest. The agent instead tracks the target by
-  physical x and re-resolves to the nearest column if the exact key
-  disappears (observed firing ~180x more often than a genuine "column
-  cleared" event in a 90s run).
-- **Fleet lead prediction** — a bullet can take real time to reach a tall
-  column's lowest invader, during which the whole fleet keeps drifting (or
-  reverses direction). The agent estimates the fleet's velocity from a short
-  rolling window of samples (it moves in discrete steps, not continuously, so
-  a single-tick delta is too noisy) and aims at the column's predicted
-  position at bullet-arrival time, not its current one.
-- **Bottom-row urgency** — a column whose lowest invader crosses
-  `INVADER_DANGER_Y` (default y=800, heuristic — the exact instant-loss
-  threshold isn't available in this standalone copy) overrides score, UFO,
-  and descent strategy entirely: reaching the bottom is instant game over
-  regardless of lives remaining. This override isn't gated on bunker
-  reachability — if the only path to a dangerously-low invader is through a
-  bunker, the agent force-fires through it anyway (eroding the bunker tiles
-  is strictly better than holding fire and losing). Columns also get a
-  softer, continuous urgency bonus in the normal value-scoring well before
-  they cross that hard line, so "clear the bottom row" is a standing
-  preference, not just a last-second panic response.
-- **Aggression knob** (`aggression=0.0..1.0`, default 0.5) — tunes the
-  score/survival tradeoff from the baseline's "Known tradeoff" below. Higher
-  aggression raises the fleet-width threshold before the agent commits to the
-  outer-column descent-slowing strategy, and once focus-firing, weighs a
-  column's remaining value (invaders left = points left) against travel
-  distance instead of always taking the nearest one. Effective aggression is
-  scaled by `lives_remaining / starting_lives`, so even `aggression=1.0`
-  automatically falls back to safe play once down to the last life. The
-  model policy receives `aggression` and `life_frac` in its state too, with
-  instructions to weigh risk the same way.
-
-### Classic-arcade exploits that do NOT apply here
-- **UFO shot-counting (300pt trick)**: `getRandomUfoScore()` is random, not
-  shot-count based.
-- **Wall of Death / Nagagoya**: invaders reaching the bottom = instant game
-  over here, not the original's invulnerability bug.
-
-## Current state / results
-
-- Plays a **full 2-minute game and survives** (e.g. 310 pts, 1 life left at
-  120s; model still alive at 90s in headless tests).
-- 45s headless (median of 3): model ~130–160, baseline ~200; both survive.
-- **Known tradeoff**: the descent-slowing strategy trades some score for
-  survival. Aggressive focus-fire scores higher over short windows but risks
-  dying sooner; the survival-first balance outscores it over longer games.
-  The `--aggression` knob (above) now exposes this tradeoff directly instead
-  of it being fixed — set it per run, and it backs off automatically as lives
-  are lost.
-
-## Not included here (in `~/ai_browser`)
-
-- `korova_*.js` — reverse-engineered game source (main/Shield/Cannon/Invader/
-  Missile/Ufo). Useful reference for the exact mechanics.
-- `inspect_korova.py` — the one-off probe used to discover the game structure.
-- The elgooG DOM-game agent (`invaders_agent.py`), the browser/monitoring
-  agents, and the rest of the `systemone` client project.
+- The game is a third-party page, and this code reads its JavaScript globals.
+  If the site changes its internals, the agent will need updating.
+- The bottom-row danger line (`INVADER_DANGER_Y`) and dodge thresholds are
+  heuristics. The game's exact loss threshold is not known here.
+- Tested on Windows 11 with Chromium via Playwright.

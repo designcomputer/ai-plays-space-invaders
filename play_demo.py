@@ -1,13 +1,13 @@
-"""Watch the Jev-style agent play korovatron.co.uk Space Invaders (headed).
+"""An AI agent that plays Space Invaders on korovatron.co.uk (headed demo).
 
 The agent reads the game's full state from JavaScript globals (no canvas pixel
 analysis), computes which columns are reachable through the four destructible
 bunkers, and uses focus fire (clear one column bottom-to-top, then the next).
 
 Usage:
-    python example_korova.py                 # model policy, 60s, headed
-    python example_korova.py --baseline      # deterministic policy (no model)
-    python example_korova.py --seconds 30    # shorter run
+    python play_demo.py                 # model policy, 60s, headed
+    python play_demo.py --baseline      # deterministic policy (no model)
+    python play_demo.py --seconds 30    # shorter run
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import argparse
 import shutil
 import tempfile
 
-from invaders_korova import KorovaAgent, record_to_mp4
+from space_invaders_agent import SpaceInvadersAgent, record_to_mp4
 
 
 def main() -> None:
@@ -28,12 +28,14 @@ def main() -> None:
     ap.add_argument("--aggression", type=float, default=0.5,
                     help="0.0=pure survival .. 1.0=pure score (default 0.5); "
                          "scaled down automatically as lives are lost")
+    ap.add_argument("--model", default="clef:27b",
+                    help="System One decision model, e.g. clef:27b, clef-flash:9b, tev1:4b (default clef:27b)")
     ap.add_argument("--record", metavar="FILE.mp4",
                     help="record the session and save it as an mp4 (requires ffmpeg on PATH)")
     args = ap.parse_args()
 
     policy = "baseline" if args.baseline else "model"
-    print(f"=== korovatron Space Invaders — policy={policy}, "
+    print(f"=== Space Invaders AI — policy={policy}, model={args.model}, "
           f"{args.seconds:.0f}s, headless={args.headless}, "
           f"aggression={args.aggression} ===")
     print("Strategy: focus fire (clear a column bottom-to-top, value-weighted) "
@@ -42,8 +44,8 @@ def main() -> None:
           "bunker gaps, switches columns as it clears them, and breaks off to\n"
           "dodge incoming missiles mid-aim.\n")
 
-    video_dir = tempfile.mkdtemp(prefix="korova_video_") if args.record else None
-    with KorovaAgent(headless=args.headless, policy=policy,
+    video_dir = tempfile.mkdtemp(prefix="space_invaders_video_") if args.record else None
+    with SpaceInvadersAgent(headless=args.headless, policy=policy, model=args.model,
                       aggression=args.aggression, record_video_dir=video_dir) as agent:
         r = agent.play(seconds=args.seconds)
 

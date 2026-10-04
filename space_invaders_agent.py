@@ -1,4 +1,4 @@
-"""Jev-style Space Invaders agent for the korovatron.co.uk canvas game.
+"""An AI agent that plays Space Invaders on korovatron.co.uk.
 
 Unlike the elgoog DOM game, this game exposes its full state as JavaScript
 globals (cannon, fleet, shields, missiles, ufo, score, lives, gameState), so
@@ -27,20 +27,20 @@ from dataclasses import dataclass
 
 from playwright.sync_api import Page, sync_playwright
 
-from systemone import SystemOneError, systemone
+from systemone import systemone
 
 URL = "https://www.korovatron.co.uk/spaceinvaders/"
-DEFAULT_BASE_URL = os.environ.get("SYSTEMONE_BASE_URL", "http://sriai:11434")
+DEFAULT_BASE_URL = os.environ.get("SYSTEMONE_BASE_URL", "http://localhost:11434")
 
 # Canvas geometry (baseWidth=896, baseHeight=1024)
 BASE_W = 896
-BASE_H = 1024
+
 CANNON_Y = 864
 SHIELD_Y = 768
 SHIELD_ROWS = 16
 SHIELD_COLS = 24
 TILE_PX = 4  # pixelSize = tileSize * 4
-SHIELD_H = SHIELD_ROWS * TILE_PX  # 64px
+
 MISSILE_SPEED = 750.0  # player bullet speed, px/s
 # Heuristic buffer before the game's instant-loss "invaders reach the bottom"
 # line (we don't have the exact threshold from source, since it's not
@@ -101,7 +101,7 @@ class PlayResult:
     hits: int = 0
 
 
-class KorovaAgent:
+class SpaceInvadersAgent:
     def __init__(self, *, headless: bool = True, model: str = "clef:27b",
                  base_url: str | None = None, policy: str = "model",
                  keep_alive: str = "30m", aim_align: int = 4,
@@ -140,7 +140,7 @@ class KorovaAgent:
         self._page: Page | None = None
 
     # ---------- lifecycle ----------
-    def __enter__(self) -> "KorovaAgent":
+    def __enter__(self) -> "SpaceInvadersAgent":
         self._pw = sync_playwright().start()
         self._browser = self._pw.chromium.launch(headless=self.headless)
         viewport = {"width": 1280, "height": 900}
@@ -682,12 +682,15 @@ if __name__ == "__main__":
     ap.add_argument("--aggression", type=float, default=0.5,
                     help="0.0=pure survival .. 1.0=pure score (default 0.5); "
                          "scaled down automatically as lives are lost")
+    ap.add_argument("--model", default="clef:27b",
+                    help="System One decision model, e.g. clef:27b, clef-flash:9b, tev1:4b (default clef:27b)")
     ap.add_argument("--record", metavar="FILE.mp4",
                     help="record the session and save it as an mp4 (requires ffmpeg on PATH)")
     args = ap.parse_args()
-    video_dir = tempfile.mkdtemp(prefix="korova_video_") if args.record else None
-    with KorovaAgent(headless=not args.headless,
+    video_dir = tempfile.mkdtemp(prefix="space_invaders_video_") if args.record else None
+    with SpaceInvadersAgent(headless=not args.headless,
                      policy="baseline" if args.baseline else "model",
+                     model=args.model,
                      aggression=args.aggression,
                      record_video_dir=video_dir) as agent:
         r = agent.play(seconds=args.seconds)
