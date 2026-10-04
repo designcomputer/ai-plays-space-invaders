@@ -51,6 +51,7 @@ def main() -> None:
 
     print("\n=== RESULT ===")
     print(f"score:       {r.score}")
+    print(f"level:       {r.level}")
     print(f"lives left:  {r.lives}")
     print(f"missiles:    {r.shots}")
     print(f"model calls: {r.model_calls}")

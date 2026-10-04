@@ -42,12 +42,28 @@ SHIELD_COLS = 24
 TILE_PX = 4  # pixelSize = tileSize * 4
 
 MISSILE_SPEED = 750.0  # player bullet speed, px/s
-# Heuristic buffer before the game's "invaders reach the bottom" loss line,
-# whose exact position isn't published. A column whose lowest invader crosses
-# this overrides score and descent strategy. y increases downward (toward the
-# cannon at CANNON_Y), so it must sit below the shield band (bottom at 832)
-# to leave real reaction time.
-INVADER_DANGER_Y = 800.0
+# Fleet descent (from the game's main.js): each bounce off a screen edge drops
+# every invader 32px. The game ends when a drop puts an invader at y >= 864,
+# and the shields switch off (shieldsOn=false: no blocking, no cover) once one
+# reaches y=736. Wave 1's bottom row starts at y=448: 13 drops of headroom,
+# and each bottom row cleared adds 2 more.
+# Height bands for a column's lowest invader. WARN (6 drops left) switches the
+# agent from clearing edge columns to clearing the bottom row; DANGER (3 drops
+# left) overrides everything else, including the UFO.
+INVADER_MID_Y = 576.0
+INVADER_WARN_Y = 672.0
+INVADER_DANGER_Y = 768.0
+
+
+def height_band(y: float) -> str:
+    """How close an invader at y is to landing, as a label the model can use."""
+    if y >= INVADER_DANGER_Y:
+        return "CRITICAL"
+    if y >= INVADER_WARN_Y:
+        return "LOW"
+    if y >= INVADER_MID_Y:
+        return "mid"
+    return "high"
 
 
 def norm(x: float) -> int:
@@ -68,6 +84,7 @@ def record_to_mp4(webm_path: str, mp4_path: str) -> None:
 # Read the whole game state from JS globals in one call.
 _STATE_JS = r"""() => {
   const o = {gameState, score, lives, shieldsOn};
+  o.level = (typeof currentLevel !== 'undefined') ? currentLevel : null;
   o.cannonX = cannon ? cannon.x : null;
   o.fleet = (fleet||[]).filter(i=>!i.isDead()).map(i=>({x:i.x, y:i.y, t:i.type}));
   o.missile = (typeof activeMissile!=='undefined' && activeMissile && activeMissile.active)
@@ -98,6 +115,7 @@ class PlayResult:
     error: str = ""
     shots: int = 0
     hits: int = 0
+    level: int = 1  # highest wave reached (2 = cleared wave 1)
 
 
 class SpaceInvadersAgent:
@@ -114,9 +132,9 @@ class SpaceInvadersAgent:
         self.policy = policy  # "model" (System One) or "baseline" (deterministic)
         self.keep_alive = keep_alive
         self.aim_align = aim_align  # norm-x tolerance for "aligned"
-        # 0.0 = pure survival (always slow the descent, stick to covered outer
-        # columns), 1.0 = pure score (chase the deepest/richest column even if
-        # farther away or exposed). Scaled down by remaining lives at runtime
+        # 0.0 = pure survival (clear outer columns longer to slow the
+        # descent), 1.0 = pure score (chase the deepest/richest column even if
+        # farther away). Scaled down by remaining lives at runtime
         # (see _decide_baseline) so an aggressive setting still plays safe on
         # the last life.
         self.aggression = max(0.0, min(1.0, aggression))
@@ -210,7 +228,9 @@ class SpaceInvadersAgent:
 
     def _reachable_x(self, st: dict, x: float) -> bool:
         """Is there a clear vertical path at canvas-x `x` through the bunker band?
-        True if no intact bunker tile sits at that x."""
+        True if no intact bunker tile sits at that x, or the shields are off."""
+        if not st.get("shieldsOn", True):
+            return True
         for s in st.get("shields", []):
             x0 = s["x"]
             x1 = x0 + SHIELD_COLS * TILE_PX
@@ -219,18 +239,6 @@ class SpaceInvadersAgent:
                 if 0 <= c < SHIELD_COLS:
                     return s["cols"][c]  # open only if that column is fully destroyed
         return True  # not over any bunker -> clear
-
-    def _covered_x(self, st: dict, x: float) -> bool:
-        """Is the cannon protected by a bunker when aligned with column x?
-        The cannon centers on x+16 when aligned; it's covered if that point is
-        under a bunker (bunkers block enemy fire coming down)."""
-        cx = x + 16  # cannon center when aligned with this column
-        for s in st.get("shields", []):
-            x0 = s["x"]
-            x1 = x0 + SHIELD_COLS * TILE_PX
-            if x0 - 8 <= cx < x1 + 8:
-                return True
-        return False
 
     def _threat(self, st: dict, cannon_x: float) -> dict | None:
         """Most urgent incoming enemy missile on a collision course with the
@@ -255,38 +263,61 @@ class SpaceInvadersAgent:
         high."""
         return any(inv["x"] <= x < inv["x"] + 32 for inv in st.get("fleet", []))
 
+    def _invader_overhead(self, st: dict, cannon_x: float) -> bool:
+        """Would a shot fired right now hit some invader? True if an invader
+        is centered over the muzzle (cannon.x+32) and no bunker is in the
+        way. Lets the cannon fire on targets of opportunity while it travels
+        or dodges, instead of only at its chosen column."""
+        mx = cannon_x + 32
+        return (self._muzzle_clear(st, cannon_x)
+                and any(abs(inv["x"] + 16 - mx) <= 10 for inv in st.get("fleet", [])))
+
+    def _muzzle_clear(self, st: dict, cannon_x: float) -> bool:
+        """Would a shot fired now pass the bunkers? The bullet is 4px wide at
+        cannon.x+32, so both of its edges must be over open bunker columns."""
+        mx = cannon_x + 32
+        return self._reachable_x(st, mx) and self._reachable_x(st, mx + 3)
+
     def _ufo_reachable_x(self, st: dict, x: float) -> bool:
         """Can a bullet aimed at x actually reach the UFO's altitude? Needs
         both a clear bunker column AND no surviving invader in the way."""
         return self._reachable_x(st, x) and not self._column_has_invader(st, x)
 
     def _targets(self, st: dict) -> dict[str, dict]:
-        """Offered target set: lowest-row invader columns + UFO, each annotated
-        with reachability (can a bullet fired at its x get through the bunkers?)."""
+        """Offered target set: invader columns + UFO. Each column is annotated
+        with reachability (can a bullet fired at its x get through the
+        bunkers?), its position in the fleet (EDGE / NEAR-EDGE), whether it
+        holds part of the fleet's bottom row (BOTTOM), and how close its
+        lowest invader is to landing (height_band)."""
         targets: dict[str, dict] = {}
         # Group invaders into columns by x (they move together). For each
-        # column, the lowest invader is what a bullet hits first — clear the
-        # column bottom-to-top for max points (10->20->20->30).
+        # column, the lowest invader is what a bullet hits first.
         cols: dict[float, list[dict]] = {}
         for inv in st.get("fleet", []):
             cols.setdefault(round(inv["x"]), []).append(inv)
-        for x in sorted(cols):
+        xs = sorted(cols)
+        bottom_y = max((inv["y"] for inv in st.get("fleet", [])), default=0.0)
+        for i, x in enumerate(xs):
             members = cols[x]
             lowest = max(members, key=lambda m: m["y"])  # closest to player
             nx = norm(x)
             reach = self._reachable_x(st, x)
-            cover = self._covered_x(st, x)
             depth = len(members)
+            edge_rank = min(i, len(xs) - 1 - i)  # 0 = outermost column
+            bottom = lowest["y"] >= bottom_y - 8
+            band = height_band(lowest["y"])
             tags = []
-            tags.append('open' if reach else 'BLOCKED')
-            if cover:
-                tags.append('cover')
-            if lowest["y"] >= SHIELD_Y:
-                tags.append('LOW')
+            if edge_rank == 0:
+                tags.append("EDGE")
+            elif edge_rank == 1:
+                tags.append("NEAR-EDGE")
+            if bottom:
+                tags.append("BOTTOM")
+            tags += [band, f"{depth} deep", "open" if reach else "BLOCKED"]
             targets[f"c{nx}"] = {"x": nx, "cx": x, "reachable": reach,
-                                 "cover": cover, "depth": depth, "lowest_y": lowest["y"],
-                                 "label": f"col x={nx} {depth} deep, lowest_y={round(lowest['y'])} "
-                                          f"({'/'.join(tags)})"}
+                                 "depth": depth, "lowest_y": lowest["y"],
+                                 "edge_rank": edge_rank, "bottom": bottom, "band": band,
+                                 "label": f"col x={nx}: {', '.join(tags)}"}
         if st.get("ufo"):
             nx = norm(st["ufo"]["x"])
             targets["ufo"] = {"x": nx, "cx": st["ufo"]["x"], "depth": 0,
@@ -304,8 +335,9 @@ class SpaceInvadersAgent:
         reachable = [v["x"] for v in targets.values() if v.get("reachable")]
         blocked = [v["x"] for v in targets.values() if not v.get("reachable")]
         lives = st.get("lives")
-        start_lives = self._start_lives or max(lives or 1, 1)
-        life_frac = max(0.0, min(1.0, (lives or 0) / start_lives)) if start_lives else 1.0
+        life_frac = self._life_frac(lives)
+        eff = self.aggression * life_frac
+        fleet_lowest_y = max((inv["y"] for inv in st.get("fleet", [])), default=0.0)
         return {
             "cannon_x": cx,
             "target_list": [f"{k}={v['x']}" for k, v in targets.items()],
@@ -319,63 +351,66 @@ class SpaceInvadersAgent:
             "lives": lives,
             "life_frac": round(life_frac, 2),
             "aggression": self.aggression,
+            # aggression scaled by lives left, as a word: small models handle
+            # a category better than a product of two numbers
+            "mode": "survival" if eff < 0.34 else ("score" if eff > 0.66 else "balanced"),
+            "fleet_lowest_y": fleet_lowest_y,
+            "fleet_lowest_band": height_band(fleet_lowest_y),
+            "columns_left": sum(1 for k in targets if k != "ufo"),
         }
+
+    def _life_frac(self, lives: int | None) -> float:
+        """Lives remaining as a fraction of starting lives (1.0 = none lost)."""
+        lives = lives or 0
+        start_lives = self._start_lives or max(lives, 1)
+        return max(0.0, min(1.0, lives / start_lives))
 
     # ---------- decide ----------
     def _decide(self, cs: dict, targets: dict[str, dict]) -> str | None:
-        if not targets:
+        # The UFO is handled deterministically in play(), and dodging in
+        # _aim_at, so the model only picks among columns. Blocked columns
+        # waste the bullet on a bunker; leave them out when there's a choice.
+        options = {k: v for k, v in targets.items() if k != "ufo"}
+        open_options = {k: v for k, v in options.items() if v.get("reachable")}
+        if len(open_options) >= 2:
+            options = open_options
+        if not options:
             return None
-        if len(targets) == 1:  # choice needs 2-26 candidates
-            return next(iter(targets))
+        if len(options) == 1:  # choice needs 2-26 candidates
+            return next(iter(options))
         state = {
             "cannon_x": cs["cannon_x"],
-            "nearest_enemy_missile_x": cs["nearest_enemy_missile_x"],
-            "missile_below_cannon": cs["missile_below_cannon"],
-            "ufo_out": cs["ufo_out"],
-            "player_missile_active": cs["player_missile_active"],
-            "score": cs["score"],
-            "lives": cs["lives"],
-            "life_frac": cs["life_frac"],
-            "aggression": cs["aggression"],
+            "columns_left": cs["columns_left"],
+            "fleet_lowest_band": cs["fleet_lowest_band"],
+            "mode": cs["mode"],
         }
         questions = {
             "target": {
                 "type": "choice",
                 "instructions": (
-                    "You are playing Space Invaders. The cannon fires "
-                    "automatically; you choose which COLUMN to focus on. All x "
-                    "are 0-100 (0=left, 100=right). KEY STRATEGY — SLOW THE "
-                    "DESCENT: the alien fleet drops a row each time it bounces "
-                    "off a screen edge, and it bounces off its OUTERMOST "
-                    "surviving column. While many columns remain, clear the "
-                    "OUTER columns (near x=0 or x=100) first to shrink the "
-                    "fleet and slow its descent — this buys survival time. "
-                    "Columns tagged 'cover' have a bunker beneath them (safe "
-                    "from enemy fire); PREFER covered outer columns, since the "
-                    "bare edges are exposed. BOTTOM ROW: each column's label "
-                    "shows lowest_y, how close its nearest invader is to the "
-                    "bottom of the screen (higher = closer = more dangerous); "
-                    "columns tagged 'LOW' are nearing the bottom and should be "
-                    "prioritized over value/distance/descent-strategy, since "
-                    "an invader reaching the bottom is instant game over. "
-                    "Once few columns remain (and none are LOW), weigh value "
-                    "vs. distance: each column's label shows how many "
-                    "invaders deep it is (more deep = more remaining points, "
-                    "cleared bottom-to-top). Bunkers BLOCK most shots: "
-                    "reachable_columns get through, blocked_columns waste the "
-                    "bullet — STRONGLY prefer reachable. The UFO is worth "
-                    "50-300pts, pick it when ufo_out=true and reachable. If "
-                    "missile_below_cannon=true, pick a column that also moves "
-                    "you away from nearest_enemy_missile_x. RISK TOLERANCE: "
-                    "aggression (0=play safe, 1=maximize score) combined with "
-                    "life_frac (1.0=full lives, lower=fewer lives left) sets "
-                    "how much risk to take — when aggression*life_frac is "
-                    "high, favor a deeper/richer column even if it's farther "
-                    "or uncovered; when it's low, stick to the nearest covered "
-                    "outer column and the descent-slowing strategy. Choose one "
-                    "column."
+                    "You are playing Space Invaders and choose which invader "
+                    "column the cannon shoots at. x is 0-100 (0=left, "
+                    "100=right). The fleet drops one row every time its "
+                    "outermost column hits a screen wall, and the game is lost "
+                    "when its lowest invader lands. Height bands: high > mid > "
+                    "LOW > CRITICAL (about to land).\n"
+                    "Each column's dist is how far the cannon must travel to "
+                    "reach it; travelling costs shooting time.\n"
+                    "Pick ONE column. Priorities, in order:\n"
+                    "1. A CRITICAL or LOW column: its lowest invader must not land.\n"
+                    "2. While fleet_lowest_band is high: EDGE, then NEAR-EDGE "
+                    "columns. A narrower fleet hits the walls, and drops, "
+                    "less often.\n"
+                    "   Once fleet_lowest_band is mid or lower: BOTTOM columns. "
+                    "Clearing the lowest row buys time before the fleet lands.\n"
+                    "3. Avoid dist above 30 unless rule 1 applies; between "
+                    "similar options take the smaller dist.\n"
+                    "mode=survival: follow the priorities strictly. "
+                    "mode=score: you may take a deeper (more points) column "
+                    "if it is close and no column is LOW or CRITICAL."
                 ),
-                "criteria": {k: v["label"] for k, v in targets.items()},
+                "criteria": {k: f"{v['label']}, dist={abs(v['x'] - cs['cannon_x'])}"
+                             for k, v in options.items()},
             },
         }
         resp = systemone(self.model, state=state, questions=questions,
@@ -397,7 +432,11 @@ class SpaceInvadersAgent:
         aggressive agent abandons descent-slowing sooner) and, once in
         focus-fire mode, weighs a column's remaining VALUE (depth = invaders
         left = points left) against the travel cost to reach it, instead of
-        always taking the nearest column."""
+        always taking the nearest column.
+
+        BOTTOM ROW: once the fleet's lowest row passes INVADER_WARN_Y, only
+        columns holding part of that row are considered. Each row cleared
+        buys two more drops before the fleet lands."""
         if not targets:
             return None
         cx = cs["cannon_x"]
@@ -407,40 +446,44 @@ class SpaceInvadersAgent:
         if not pool:
             return None
 
-        lives = cs.get("lives") or 0
-        start_lives = self._start_lives or max(lives, 1)
-        life_frac = max(0.0, min(1.0, lives / start_lives)) if start_lives else 1.0
-        eff_aggression = self.aggression * life_frac
+        eff_aggression = self.aggression * self._life_frac(cs.get("lives"))
 
-        wide_threshold = 8 + round(eff_aggression * 8)  # 8 (survival) .. 16 (aggressive)
+        if cs["fleet_lowest_y"] >= INVADER_WARN_Y:
+            bottom = {k: v for k, v in pool.items() if v.get("bottom")}
+            if bottom:
+                # nearest bottom column; an edge column breaks near-ties
+                return min(bottom, key=lambda k: abs(bottom[k]["x"] - cx)
+                           - 5 * (bottom[k]["edge_rank"] == 0))
+
+        # the fleet has 11 columns: clear edges until 9 (aggressive) .. 5
+        # (survival) remain
+        wide_threshold = 5 + round((1.0 - eff_aggression) * 4)
         if len(cols) >= wide_threshold:
-            # Prioritize OUTER columns, but only ones with bunker COVER (the bare
-            # edges are exposed to enemy fire). Clearing a covered outer column
-            # shrinks the fleet (slower descent) while keeping the cannon safe.
-            xs = sorted(pool, key=lambda k: pool[k]["x"])
-            outer = set(xs[:3] + xs[-3:])  # leftmost 3 + rightmost 3
-            covered_outer = {k for k in outer if pool[k].get("cover")}
-            if covered_outer:
-                return min(covered_outer, key=lambda k: abs(pool[k]["x"] - cx))
-            # no covered outer column: fall back to nearest outer (still slows
-            # descent) rather than giving up the strategy entirely
+            # Prioritize OUTER columns: clearing them shrinks the fleet, so it
+            # bounces (and drops) less often. Prefer the outermost, then the
+            # nearest. Bunker cover is ignored: a column that is both covered
+            # and open sits over a narrow bunker hole and drifts out of it
+            # within a second or two, leaving the cannon chasing a blocked
+            # column; the reactive dodge handles enemy fire instead.
+            outer = {k for k, v in pool.items() if v["edge_rank"] <= 2}  # outermost 3 per side
             if outer:
-                return min(outer, key=lambda k: abs(pool[k]["x"] - cx))
+                return min(outer, key=lambda k: abs(pool[k]["x"] - cx) + 15 * pool[k]["edge_rank"])
 
         # Narrow fleet (or aggressive enough to skip descent-slowing): score by
         # remaining value vs. travel cost. Survival-leaning settings stay
         # nearest-column; score-leaning settings reach further for
         # a deeper, richer column. URGENCY (how close the column's lowest
-        # invader is to the danger line) is weighted heavily, so columns nearing
-        # the bottom are prioritized before they reach the hard override in play().
+        # invader is to the warning line) is weighted heavily, and BOTTOM-row
+        # columns get a bonus, so the lowest invaders are thinned out before
+        # the bottom-row phase above kicks in.
         def score(k: str) -> float:
             v = pool[k]
             value = v.get("depth", 0) / 4.0  # normalize (max column depth ~4-5)
             dist_cost = abs(v["x"] - cx) / 100.0
-            cover_bonus = 0.1 if v.get("cover") else 0.0
-            urgency = max(0.0, (v.get("lowest_y", 0) - SHIELD_Y) / (INVADER_DANGER_Y - SHIELD_Y))
+            bottom_bonus = 0.3 if v.get("bottom") else 0.0
+            urgency = max(0.0, (v.get("lowest_y", 0) - INVADER_MID_Y) / (INVADER_WARN_Y - INVADER_MID_Y))
             return (eff_aggression * value - (1.0 - 0.5 * eff_aggression) * dist_cost
-                    + cover_bonus + 1.5 * urgency)
+                    + bottom_bonus + 1.5 * urgency)
 
         return max(pool, key=score)
 
@@ -451,7 +494,8 @@ class SpaceInvadersAgent:
             return True
         return False
 
-    def _aim_at(self, target_key: str, duration: float, force_fire: bool = False) -> int:
+    def _aim_at(self, target_key: str, duration: float, force_fire: bool = False,
+                bottom_only: bool = False, dodge: bool = True) -> int:
         """Move cannon toward the live x of `target_key`, firing throughout.
         Re-reads the target's current x each iteration (the fleet drifts).
 
@@ -459,6 +503,14 @@ class SpaceInvadersAgent:
         alignment) — used for the bottom-row emergency override in play(): if
         a dangerously-low invader's only path is through a bunker, shooting
         the bunker to erode it is strictly better than holding fire.
+
+        bottom_only=True stops as soon as the target column no longer holds
+        part of the fleet's bottom row, so the next shot goes to another
+        bottom-row invader instead of further up the same column.
+
+        dodge=False ignores enemy missiles: play() uses it when the fleet is
+        about to land and a life can be spared, since a lost life costs less
+        than a landing (game over).
 
         DRIFT-TOLERANT KEY RESOLUTION: a column's key (e.g. "c42") is derived
         from its rounded normalized x, so drift across a rounding boundary
@@ -494,7 +546,7 @@ class SpaceInvadersAgent:
             if cx is None:
                 break
 
-            threat = self._threat(st, cx)
+            threat = self._threat(st, cx) if dodge else None
             if threat is not None:
                 # DODGE: an enemy missile is on a collision course with the
                 # cannon's current position. Break off aiming and move away
@@ -505,6 +557,10 @@ class SpaceInvadersAgent:
                         self.page.keyboard.up(key)
                     self.page.keyboard.down(dodge_key)
                     key = dodge_key
+                # keep shooting while dodging: once the fleet is low, enemy
+                # missiles are in the dodge band almost constantly
+                if not st.get("missile") and self._invader_overhead(st, cx):
+                    self.page.keyboard.press("Space")
                 if st.get("missile") and not had_missile:
                     fired += 1
                 had_missile = st.get("missile") is not None
@@ -522,6 +578,8 @@ class SpaceInvadersAgent:
                     tgt = near_v
             if tgt is None:
                 break  # target really gone (cleared, or drifted too far to be the same column)
+            if bottom_only and not tgt.get("bottom"):
+                break
             last_cx = tgt["cx"]
 
             aim_cx = tgt["cx"]  # left-edge x to aim at (lead-adjusted below)
@@ -565,7 +623,20 @@ class SpaceInvadersAgent:
             # reachable. One bullet at a time, and a misaligned/blocked shot
             # takes ~1s to clear the top or just hits the bunker — don't
             # waste it.
-            if aligned and not st.get("missile") and (reachable or force_fire):
+            # Targets of opportunity: while travelling to a column, fire at
+            # any invader that passes over the muzzle (not while lining up on
+            # the UFO, where an early shot would hold the one bullet slot).
+            # The planned path (reachable, at the predicted x) and the actual
+            # muzzle path must both be clear: within the alignment tolerance
+            # the muzzle can sit over a bunker edge the target column misses.
+            if target_key == "ufo":
+                reachable = (reachable and self._muzzle_clear(st, cx)
+                             and not self._column_has_invader(st, cx + 32))
+            else:
+                reachable = reachable and self._muzzle_clear(st, cx)
+            if not st.get("missile") and (
+                    (aligned and (reachable or force_fire))
+                    or (target_key != "ufo" and self._invader_overhead(st, cx))):
                 self.page.keyboard.press("Space")
             if st.get("missile") and not had_missile:
                 fired += 1
@@ -591,14 +662,26 @@ class SpaceInvadersAgent:
                 time.sleep(0.2)
                 continue
             result.ticks += 1
+            level = st.get("level") or 1
+            if level > result.level:
+                result.level = level
+                self._current_target = self._current_target_x = None  # new fleet
             targets = self._targets(st)
             cs = self._compact_state(st, targets)
 
             # FOCUS FIRE: clear one column bottom-to-top, then move to the
             # nearest remaining column. The fleet drifts, so column x-keys
             # change — re-adopt the nearest column to our last focus x.
+            # Once the fleet's bottom row passes INVADER_WARN_Y, a focus
+            # column stays valid only while it still holds part of the bottom
+            # row: the agent then works along that row instead of up a column.
+            # (Only while some bottom column is reachable; otherwise any open
+            # column beats waiting for one to leave a bunker's shadow.)
             DRIFT_TOL = 10  # norm-x units
             cols = {k: v for k, v in targets.items() if k != "ufo"}
+            fleet_low = cs["fleet_lowest_y"] >= INVADER_WARN_Y
+            want_bottom = fleet_low and any(v.get("bottom") and v.get("reachable")
+                                            for v in cols.values())
 
             # 0) BOTTOM ROW: a column whose lowest invader has crossed the
             # danger line overrides everything else (score, UFO, descent
@@ -615,22 +698,26 @@ class SpaceInvadersAgent:
             # appears. It crosses the screen in a couple of seconds and may pass
             # behind a bunker along the way, so the cannon should already be
             # aligned when a gap opens. Firing is still gated on reachability
-            # (see _aim_at).
+            # (see _aim_at). Only taken up while a shot can currently reach
+            # it (chasing a UFO hidden behind the fleet wastes seconds of
+            # firing time), and skipped once the fleet is low: survival first.
             if urgent:
                 self._current_target = max(urgent, key=lambda k: urgent[k]["lowest_y"])
                 force_fire = True
-            elif cs["ufo_out"]:
+            elif cs["ufo_out"] and not fleet_low and targets["ufo"].get("reachable"):
                 self._current_target = "ufo"
             else:
                 # 2) Keep the current focus column if it's still valid.
                 cur = targets.get(self._current_target) if self._current_target else None
                 valid = (cur is not None and cur.get("reachable")
-                         and not cs["missile_below_cannon"])
+                         and not cs["missile_below_cannon"]
+                         and (cur.get("bottom") or not want_bottom))
                 if not valid and self._current_target_x is not None and cols:
                     # re-adopt nearest column to last focus x (drift-tolerant)
                     near = min(cols.items(), key=lambda kv: abs(kv[1]["x"] - self._current_target_x))
                     if (abs(near[1]["x"] - self._current_target_x) <= DRIFT_TOL
-                            and near[1].get("reachable")):
+                            and near[1].get("reachable")
+                            and (near[1].get("bottom") or not want_bottom)):
                         self._current_target = near[0]
                         cur = targets[self._current_target]
                         valid = True
@@ -649,7 +736,10 @@ class SpaceInvadersAgent:
             # Aim at the current target for a chunk (long enough to align +
             # fire, short enough to react to threats). Re-decide next chunk.
             if self._current_target in targets:
-                result.shots += self._aim_at(self._current_target, 0.5, force_fire=force_fire)
+                result.shots += self._aim_at(self._current_target, 0.5, force_fire=force_fire,
+                                             bottom_only=want_bottom and not force_fire
+                                             and self._current_target != "ufo",
+                                             dodge=not (force_fire and (st.get("lives") or 0) > 1))
             else:
                 self._reflex_fire(st)
 
@@ -685,7 +775,7 @@ if __name__ == "__main__":
                      aggression=args.aggression,
                      record_video_dir=video_dir) as agent:
         r = agent.play(seconds=args.seconds)
-        print(f"\nscore={r.score} lives={r.lives} ticks={r.ticks} "
+        print(f"\nscore={r.score} level={r.level} lives={r.lives} ticks={r.ticks} "
               f"model_calls={r.model_calls} shots={r.shots} error={r.error!r}")
     if args.record:
         if agent.video_path:
