@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://www.korovatron.co.uk/images/icons/invaderIcon.png" width="96" alt="Space Invaders invader icon (Neil Kendall / Korovatron)">
+</p>
+
 # AI Plays Space Invaders
 
 An AI agent that plays [korovatron.co.uk's Space Invaders](https://www.korovatron.co.uk/spaceinvaders/)
@@ -126,6 +130,6 @@ server-side error (`non-finite logit`) on every request on the test server.
 
 ## Credits
 
-Space Invaders is played on [Korovatron](https://www.korovatron.co.uk/spaceinvaders/),
-the author's site. This project only plays the game and does not include or
+Space Invaders was written by Neil Kendall, who also owns the website
+[korovatron.co.uk](https://www.korovatron.co.uk/spaceinvaders/) where the game is played. This project only plays the game and does not include or
 redistribute its code or assets. Please visit the site and support the author's work.
