@@ -62,7 +62,7 @@ audio, record the window with a system tool (e.g. Windows Game Bar,
 OBSERVE  read game state from JavaScript globals (no pixel analysis)
 DECIDE   the model picks ONE column to focus on, from options we offer it
 AIM      deterministic: align the cannon, leading moving targets
-FIRE     deterministic: fire when aligned, the path is clear, and no shot is in flight
+FIRE     deterministic: hold fire while aligned and the path is clear
 DODGE    deterministic: break off aiming when an enemy missile is on course
 ```
 
@@ -97,6 +97,12 @@ fleet bounces less often. The strategy is built around these two levers.
   chasing a column gets slow and inaccurate. The cannon parks at the nearest
   clear spot that some invader will sweep over, and fires when an invader's
   predicted position will be over the muzzle after the bullet's flight time.
+- **Held fire key.** The game checks whether Space is held once per frame,
+  so a quick tap (down and up within a millisecond or two) usually goes
+  unseen. The agent holds Space while it wants to fire, which also launches
+  the next bullet on the first frame the previous one is gone. This was the
+  largest single improvement: fire rate went from about 0.4 to about 1 shot
+  per second.
 - **Targets of opportunity.** While travelling or dodging, the cannon fires
   at any invader that passes directly overhead.
 - **Bunker awareness.** Four destructible bunkers block shots. Clearance is
@@ -124,15 +130,19 @@ The model is reached through a System One endpoint (`POST /v1/systemone`).
 `systemone.py` is a small client for it. Model choice is set with `--model`
 or `SpaceInvadersAgent(model=...)`.
 
-Current results with clef:27b on a local server, 10 games, 300s cap, default
-aggression. Kills (out of 55 in wave 1) measure progress toward wave 2
-better than score, which UFO hits inflate.
+Current results with clef:27b on a local server, 5 games, 300s cap, default
+aggression. Each wave has 55 invaders. Kills measure progress better than
+score, which UFO hits inflate.
 
-| Model | Mean kills | Kill range | Mean score | Mean lives left | Model calls / game |
-|---|---|---|---|---|---|
-| clef:27b | 44.3 | 39–49 | 741 | 2.8 | ~22 |
+| Model | Waves cleared | Highest level | Mean kills | Kill range | Mean score | Mean lives left | Model calls / game |
+|---|---|---|---|---|---|---|---|
+| clef:27b | 4 of 5 games cleared wave 1 | 5 | 183 | 47–264 | 3348 | 2.8 | ~43 |
 
-No game has cleared wave 1 yet. Every game ended with the invaders landing.
+Levels reached in the 5 games: 4, 5, 1, 5, 3. Results vary a lot from game to
+game, and the one failure ended with the invaders landing in wave 1.
+
+Before the held-fire-key fix, the same strategy averaged 44.3 kills (range
+39–49, 10 games) and never cleared wave 1.
 
 Earlier results, from a previous version of the agent with a different
 prompt and strategy (five runs each, score only):

@@ -166,6 +166,7 @@ class SpaceInvadersAgent:
         self._fleet_track: deque[tuple[float, float]] = deque()
         self._fleet_track_key: tuple[int, float] | None = None
         self._fleet_speed_est = 0.0
+        self._fire_down = False  # Space currently held (see _hold_fire)
         self._pw = None
         self._browser = None
         self._context = None
@@ -223,20 +224,43 @@ class SpaceInvadersAgent:
         page.evaluate("() => window.focus()")
         page.mouse.click(BASE_W / 2, 300)
         page.wait_for_timeout(400)
-        page.keyboard.press("Space")
+        self._tap("Space")
+        if not self._wait_for_play():
+            # fallback: start directly
+            page.evaluate("() => { try { newGame(); } catch(e){} }")
+            if not self._wait_for_play():
+                raise RuntimeError("game did not start (gameState != 1)")
+        self._check_input()
+
+    def _tap(self, key: str) -> None:
+        """Press a key long enough for the game's once-per-frame key poll to
+        see it (see _hold_fire)."""
+        self.page.keyboard.down(key)
+        self.page.wait_for_timeout(50)
+        self.page.keyboard.up(key)
+
+    def _wait_for_play(self) -> bool:
         for _ in range(30):
-            st = page.evaluate(_STATE_JS)
-            if st.get("gameState") == 1:
+            if self._state().get("gameState") == 1:
+                return True
+            self.page.wait_for_timeout(300)
+        return False
+
+    def _check_input(self) -> None:
+        """Make sure key presses reach the game. If the game was started by
+        the newGame() fallback, the page may not have keyboard focus, and the
+        agent would play blind: no moves, no shots. Hold ArrowLeft briefly
+        and confirm the cannon moved; refocus once if it didn't."""
+        for attempt in range(2):
+            x0 = self._state().get("cannonX")
+            self.page.keyboard.down("ArrowLeft")
+            self.page.wait_for_timeout(150)
+            self.page.keyboard.up("ArrowLeft")
+            if self._state().get("cannonX") != x0:
                 return
-            page.wait_for_timeout(300)
-        # fallback: start directly
-        page.evaluate("() => { try { newGame(); } catch(e){} }")
-        for _ in range(30):
-            st = page.evaluate(_STATE_JS)
-            if st.get("gameState") == 1:
-                return
-            page.wait_for_timeout(300)
-        raise RuntimeError("game did not start (gameState != 1)")
+            self.page.evaluate("() => { window.focus(); document.body.focus(); }")
+            self.page.locator("canvas").first.focus()
+        raise RuntimeError("keyboard input does not reach the game")
 
     # ---------- observe ----------
     def _state(self) -> dict:
@@ -504,9 +528,26 @@ class SpaceInvadersAgent:
         return max(pool, key=score)
 
     # ---------- act ----------
+    def _hold_fire(self, want: bool) -> None:
+        """Hold Space down while a shot is wanted, release it otherwise.
+
+        The game samples a keys.Space flag once per frame and fires whenever
+        it is set and no player bullet is in flight. A keyboard.press()
+        (down+up within a millisecond or two) usually lands between frames
+        and is never seen, so firing is done by holding the key instead,
+        which also fires on the first frame the bullet slot frees up."""
+        if want != self._fire_down:
+            if want:
+                self.page.keyboard.down("Space")
+            else:
+                self.page.keyboard.up("Space")
+            self._fire_down = want
+
     def _reflex_fire(self, st: dict) -> bool:
         if st.get("gameState") == 1 and not st.get("missile"):
-            self.page.keyboard.press("Space")
+            self._hold_fire(True)
+            time.sleep(0.04)  # long enough to span a frame (~17ms)
+            self._hold_fire(False)
             return True
         return False
 
@@ -575,8 +616,7 @@ class SpaceInvadersAgent:
                     key = dodge_key
                 # keep shooting while dodging: once the fleet is low, enemy
                 # missiles are in the dodge band almost constantly
-                if not st.get("missile") and self._invader_overhead(st, cx):
-                    self.page.keyboard.press("Space")
+                self._hold_fire(self._invader_overhead(st, cx))
                 if st.get("missile") and not had_missile:
                     fired += 1
                 had_missile = st.get("missile") is not None
@@ -650,16 +690,17 @@ class SpaceInvadersAgent:
                              and not self._column_has_invader(st, cx + 32))
             else:
                 reachable = reachable and self._muzzle_clear(st, cx)
-            if not st.get("missile") and (
-                    (aligned and (reachable or force_fire))
-                    or (target_key != "ufo" and self._invader_overhead(st, cx))):
-                self.page.keyboard.press("Space")
+            # Held even while a bullet is in flight, so the next one leaves on
+            # the first frame the slot frees up.
+            self._hold_fire((aligned and (reachable or force_fire))
+                            or (target_key != "ufo" and self._invader_overhead(st, cx)))
             if st.get("missile") and not had_missile:
                 fired += 1
             had_missile = st.get("missile") is not None
             time.sleep(0.02)
         if key:
             self.page.keyboard.up(key)
+        self._hold_fire(False)
         return fired
 
     def _fleet_speed(self, st: dict) -> float:
@@ -755,15 +796,14 @@ class SpaceInvadersAgent:
                 if want:
                     self.page.keyboard.down(want)
                 key = want
-            if (not st.get("missile") and self._muzzle_clear(st, cx)
-                    and self._shot_will_hit(st, cx, speed)):
-                self.page.keyboard.press("Space")
+            self._hold_fire(self._muzzle_clear(st, cx) and self._shot_will_hit(st, cx, speed))
             if st.get("missile") and not had_missile:
                 fired += 1
             had_missile = st.get("missile") is not None
             time.sleep(0.02)
         if key:
             self.page.keyboard.up(key)
+        self._hold_fire(False)
         return fired
 
     # ---------- main loop ----------
