@@ -54,6 +54,16 @@ INVADER_MID_Y = 576.0
 INVADER_WARN_Y = 672.0
 INVADER_DANGER_Y = 768.0
 
+# End-game ambush. As the fleet shrinks it speeds up (bigger steps, shorter
+# tempo) and chasing a column gets slower and less accurate. At or below
+# AMBUSH_FLEET invaders (where the game raises the step size from 4 to 6px)
+# the cannon parks where the fleet will pass and times each shot to the
+# fleet's predicted position instead. Earlier, the fleet is too slow for
+# parking to pay off and edge/bottom-row targeting matters more.
+AMBUSH_FLEET = 22
+FIRE_LATENCY = 0.04  # s from reading state to the bullet leaving the cannon
+WALL_X = BASE_W - 32  # the fleet bounces before any invader's x passes this
+
 
 def height_band(y: float) -> str:
     """How close an invader at y is to landing, as a label the model can use."""
@@ -85,6 +95,7 @@ def record_to_mp4(webm_path: str, mp4_path: str) -> None:
 _STATE_JS = r"""() => {
   const o = {gameState, score, lives, shieldsOn};
   o.level = (typeof currentLevel !== 'undefined') ? currentLevel : null;
+  o.fleetDir = (typeof Invader !== 'undefined') ? Invader.direction : null;
   o.cannonX = cannon ? cannon.x : null;
   o.fleet = (fleet||[]).filter(i=>!i.isDead()).map(i=>({x:i.x, y:i.y, t:i.type}));
   o.missile = (typeof activeMissile!=='undefined' && activeMissile && activeMissile.active)
@@ -150,6 +161,11 @@ class SpaceInvadersAgent:
         self._current_target: str | None = None
         self._current_target_x: float | None = None  # for drift-tolerant persistence
         self._start_lives: int | None = None
+        # fleet speed tracking for the ambush: (t, mean x) samples taken while
+        # the fleet size and row are unchanged, plus the last good estimate
+        self._fleet_track: deque[tuple[float, float]] = deque()
+        self._fleet_track_key: tuple[int, float] | None = None
+        self._fleet_speed_est = 0.0
         self._pw = None
         self._browser = None
         self._context = None
@@ -646,6 +662,110 @@ class SpaceInvadersAgent:
             self.page.keyboard.up(key)
         return fired
 
+    def _fleet_speed(self, st: dict) -> float:
+        """Fleet horizontal speed (px/s, magnitude) from ~0.3s of samples of
+        the fleet's mean x. Samples restart whenever an invader dies (the
+        mean jumps) or the fleet drops a row (it just reversed); until enough
+        new samples arrive, the previous estimate is reused."""
+        fleet = st.get("fleet", [])
+        if not fleet:
+            return self._fleet_speed_est
+        now = time.time()
+        key = (len(fleet), max(inv["y"] for inv in fleet))
+        if key != self._fleet_track_key:
+            self._fleet_track.clear()
+            self._fleet_track_key = key
+        self._fleet_track.append((now, sum(inv["x"] for inv in fleet) / len(fleet)))
+        while now - self._fleet_track[0][0] > 0.3:
+            self._fleet_track.popleft()
+        t0, x0 = self._fleet_track[0]
+        if now - t0 >= 0.1:
+            self._fleet_speed_est = abs(self._fleet_track[-1][1] - x0) / (now - t0)
+        return self._fleet_speed_est
+
+    def _shot_will_hit(self, st: dict, cannon_x: float, speed: float) -> bool:
+        """Will a bullet fired now from cannon_x meet an invader? Each
+        invader's x is projected forward by the bullet's flight time to its
+        row, reflecting off the wall if the fleet bounces first (the drop
+        that comes with a bounce is ignored)."""
+        fleet = st.get("fleet", [])
+        if not fleet:
+            return False
+        v = speed if st.get("fleetDir") == "right" else -speed
+        lo = min(inv["x"] for inv in fleet)
+        hi = max(inv["x"] for inv in fleet)
+        room = (WALL_X - hi) if v > 0 else lo  # travel left before the bounce
+        bullet_cx = cannon_x + 34  # 4px bullet at cannon.x+32
+        for inv in fleet:
+            t = FIRE_LATENCY + max(0.0, CANNON_Y - (inv["y"] + 32)) / MISSILE_SPEED
+            dx = abs(v) * t
+            if dx > room:
+                dx = room - (dx - room)
+            x = inv["x"] + (dx if v > 0 else -dx)
+            if abs(x + 16 - bullet_cx) <= 12:
+                return True
+        return False
+
+    def _park_x(self, st: dict, cannon_x: float) -> float:
+        """Nearest cannon x that some invader will pass over and whose shots
+        clear the bunkers (with an 8px margin on each side so small position
+        drift doesn't put the muzzle over a bunker edge).
+
+        The fleet only sweeps between the walls, so each invader covers a
+        limited band of x; once the columns over a spot are cleared, the
+        fleet's gap can sweep back and forth across it without any invader
+        ever passing overhead. Only spots inside some invader's band count."""
+        fleet = st.get("fleet", [])
+        if not fleet:
+            return cannon_x
+        lo = min(inv["x"] for inv in fleet)
+        hi = max(inv["x"] for inv in fleet)
+        # range of each invader's center, as the fleet sweeps wall to wall
+        bands = [(inv["x"] - lo + 16, inv["x"] + (WALL_X - hi) + 16) for inv in fleet]
+        spots = [x for x in range(0, BASE_W - 64 + 1, 4)
+                 if any(a + 8 <= x + 34 <= b - 8 for a, b in bands)
+                 and self._muzzle_clear(st, x - 8) and self._muzzle_clear(st, x + 8)]
+        return min(spots, key=lambda x: abs(x - cannon_x), default=cannon_x)
+
+    def _ambush(self, duration: float, dodge: bool = True) -> int:
+        """End-game: park at the nearest clear spot and fire whenever the
+        fleet's predicted position puts an invader over the muzzle (see
+        AMBUSH_FLEET). Dodges like _aim_at. Returns missiles launched."""
+        fired = 0
+        had_missile = False
+        key = None
+        end = time.time() + duration
+        while time.time() < end:
+            st = self._state()
+            if st.get("gameState") != 1 or not st.get("fleet"):
+                break
+            cx = st.get("cannonX")
+            if cx is None:
+                break
+            speed = self._fleet_speed(st)
+            threat = self._threat(st, cx) if dodge else None
+            if threat is not None:
+                want = "ArrowRight" if threat["x"] < cx + 32 else "ArrowLeft"
+            else:
+                diff = self._park_x(st, cx) - cx
+                want = None if abs(diff) <= 4 else ("ArrowRight" if diff > 0 else "ArrowLeft")
+            if want != key:
+                if key:
+                    self.page.keyboard.up(key)
+                if want:
+                    self.page.keyboard.down(want)
+                key = want
+            if (not st.get("missile") and self._muzzle_clear(st, cx)
+                    and self._shot_will_hit(st, cx, speed)):
+                self.page.keyboard.press("Space")
+            if st.get("missile") and not had_missile:
+                fired += 1
+            had_missile = st.get("missile") is not None
+            time.sleep(0.02)
+        if key:
+            self.page.keyboard.up(key)
+        return fired
+
     # ---------- main loop ----------
     def play(self, seconds: float = 30.0) -> PlayResult:
         self._start_game()
@@ -666,6 +786,18 @@ class SpaceInvadersAgent:
             if level > result.level:
                 result.level = level
                 self._current_target = self._current_target_x = None  # new fleet
+
+            # END-GAME: few invaders left and too fast to chase; park and
+            # time shots instead (no column choice, so no model call).
+            fleet = st.get("fleet", [])
+            if 0 < len(fleet) <= AMBUSH_FLEET:
+                danger = max(inv["y"] for inv in fleet) >= INVADER_DANGER_Y
+                result.shots += self._ambush(
+                    0.5, dodge=not (danger and (st.get("lives") or 0) > 1))
+                self._current_target = self._current_target_x = None
+                self._record(result)
+                continue
+
             targets = self._targets(st)
             cs = self._compact_state(st, targets)
 
@@ -742,14 +874,16 @@ class SpaceInvadersAgent:
                                              dodge=not (force_fire and (st.get("lives") or 0) > 1))
             else:
                 self._reflex_fire(st)
-
-            # hit detection: score increase
-            st2 = self._state()
-            if result.score and st2.get("score") != result.score:
-                result.hits += 1
-            result.score = str(st2.get("score"))
-            result.lives = st2.get("lives") or 0
+            self._record(result)
         return result
+
+    def _record(self, result: PlayResult) -> None:
+        """Update score, lives and hit count after a chunk of play."""
+        st2 = self._state()
+        if result.score and st2.get("score") != result.score:
+            result.hits += 1
+        result.score = str(st2.get("score"))
+        result.lives = st2.get("lives") or 0
 
 
 if __name__ == "__main__":
