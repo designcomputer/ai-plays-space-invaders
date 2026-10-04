@@ -18,8 +18,11 @@ that needs fast control loops with occasional model input.
 
 ## Demo
 
-A 23-second clip of the agent playing, with the game's sound:
-[▶ Watch the demo (docs/demo.mp4)](docs/demo.mp4)
+A 23-second clip of the agent playing, with the game's sound. Click to play:
+
+https://github.com/user-attachments/assets/1cec175c-6c9a-423a-aa29-984fef88ece3
+
+Download copy: [docs/demo.mp4](docs/demo.mp4)
 
 ## Quick start
 
