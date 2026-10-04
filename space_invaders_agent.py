@@ -42,12 +42,11 @@ SHIELD_COLS = 24
 TILE_PX = 4  # pixelSize = tileSize * 4
 
 MISSILE_SPEED = 750.0  # player bullet speed, px/s
-# Heuristic buffer before the game's instant-loss "invaders reach the bottom"
-# line (we don't have the exact threshold from source, since it's not
-# included in this standalone copy) — prioritize a column once its lowest
-# invader crosses this, overriding score/descent strategy entirely. y
-# increases downward (toward the cannon at CANNON_Y), so this must be well
-# above SHIELD_Y's far side (832) to leave real reaction time.
+# Heuristic buffer before the game's "invaders reach the bottom" loss line,
+# whose exact position isn't published. A column whose lowest invader crosses
+# this overrides score and descent strategy. y increases downward (toward the
+# cannon at CANNON_Y), so it must sit below the shield band (bottom at 832)
+# to leave real reaction time.
 INVADER_DANGER_Y = 800.0
 
 
@@ -108,8 +107,7 @@ class SpaceInvadersAgent:
                  aggression: float = 0.5,
                  dodge_trigger_y: float = 600.0, dodge_radius: float = 56.0,
                  record_video_dir: str | None = None):
-        # clef:27b beats tev1:4b here (higher score + better dodging/survival)
-        # at ~2.6x latency (240ms vs 92ms/call) — still fast enough for the game.
+        # Default decision model. See the README for models compared on this game.
         self.headless = headless
         self.model = model
         self.base_url = base_url or DEFAULT_BASE_URL
@@ -254,8 +252,7 @@ class SpaceInvadersAgent:
         """Is there a live invader anywhere in the 32px-wide column at x? The
         UFO flies above the whole fleet, so a shot aimed at it is intercepted
         by any surviving invader in that column long before it gets that
-        high — this is the dominant reason UFO shots were missing even once
-        aim/lead/bunker-reachability were all correct."""
+        high."""
         return any(inv["x"] <= x < inv["x"] + 32 for inv in st.get("fleet", []))
 
     def _ufo_reachable_x(self, st: dict, x: float) -> bool:
@@ -432,12 +429,10 @@ class SpaceInvadersAgent:
 
         # Narrow fleet (or aggressive enough to skip descent-slowing): score by
         # remaining value vs. travel cost. Survival-leaning settings stay
-        # nearest-column (as before); score-leaning settings reach further for
+        # nearest-column; score-leaning settings reach further for
         # a deeper, richer column. URGENCY (how close the column's lowest
-        # invader is to the danger line) is weighted heavily so a column
-        # nearing the bottom gets prioritized well before the hard override
-        # in play() would kick in — not just "clear the bottom row" once it's
-        # almost too late.
+        # invader is to the danger line) is weighted heavily, so columns nearing
+        # the bottom are prioritized before they reach the hard override in play().
         def score(k: str) -> float:
             v = pool[k]
             value = v.get("depth", 0) / 4.0  # normalize (max column depth ~4-5)
@@ -478,12 +473,11 @@ class SpaceInvadersAgent:
         to a tall column's lowest invader — especially right as the fleet
         reverses direction mid-flight — so a shot aimed at the target's
         CURRENT x can miss. We lead both: the UFO exposes its exact velocity
-        as `ufo.speed` (used directly — numerically differencing sampled
-        positions was tried first and was too noisy, since per-tick position
-        deltas are tiny relative to page.evaluate() round-trip jitter); the
-        fleet doesn't expose a velocity field and moves in discrete steps
-        rather than continuously, so we estimate it from a short rolling
-        window of samples (noisy single-tick deltas average out).
+        as `ufo.speed` (used directly, since per-tick position deltas are tiny
+        relative to page.evaluate() round-trip jitter and differencing them is
+        too noisy). The fleet doesn't expose a velocity field and moves in
+        discrete steps rather than continuously, so we estimate it from a short
+        rolling window of samples (noisy single-tick deltas average out).
 
         Returns the number of real missiles launched."""
         fired = 0
@@ -617,14 +611,11 @@ class SpaceInvadersAgent:
             urgent = {k: v for k, v in cols.items() if v.get("lowest_y", 0) >= INVADER_DANGER_Y}
             force_fire = False
 
-            # 1) UFO is high-value (50-300pts): track it the whole time it's
-            # out, not only once it's clear of a bunker. The UFO crosses the
-            # full screen in a couple seconds and often transits a bunker's
-            # ~96px span along the way; waiting for "reachable" before
-            # starting to chase often left too little runway to align before
-            # it flew off-screen. Firing is still gated on reachability (see
-            # _aim_at), so this just means the cannon is already aligned the
-            # instant a gap opens.
+            # 1) UFO is high-value (50-300pts): track it from the moment it
+            # appears. It crosses the screen in a couple of seconds and may pass
+            # behind a bunker along the way, so the cannon should already be
+            # aligned when a gap opens. Firing is still gated on reachability
+            # (see _aim_at).
             if urgent:
                 self._current_target = max(urgent, key=lambda k: urgent[k]["lowest_y"])
                 force_fire = True
