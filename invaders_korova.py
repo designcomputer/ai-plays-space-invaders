@@ -20,6 +20,7 @@ Controls: ArrowLeft/ArrowRight move the cannon, Space fires.
 from __future__ import annotations
 
 import os
+import subprocess
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -53,6 +54,16 @@ INVADER_DANGER_Y = 800.0
 def norm(x: float) -> int:
     """Canvas x (0..896) -> 0..100 for the model."""
     return max(0, min(100, round(x / BASE_W * 100)))
+
+
+def record_to_mp4(webm_path: str, mp4_path: str) -> None:
+    """Convert a Playwright-recorded .webm to .mp4 via ffmpeg (must be on
+    PATH). Playwright only records video as .webm; this is the one extra
+    step to get an .mp4 out of it."""
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", webm_path, "-c:v", "libx264", "-pix_fmt", "yuv420p", mp4_path],
+        check=True, capture_output=True,
+    )
 
 
 # Read the whole game state from JS globals in one call.
@@ -95,7 +106,8 @@ class KorovaAgent:
                  base_url: str | None = None, policy: str = "model",
                  keep_alive: str = "30m", aim_align: int = 4,
                  aggression: float = 0.5,
-                 dodge_trigger_y: float = 600.0, dodge_radius: float = 56.0):
+                 dodge_trigger_y: float = 600.0, dodge_radius: float = 56.0,
+                 record_video_dir: str | None = None):
         # clef:27b beats tev1:4b here (higher score + better dodging/survival)
         # at ~2.6x latency (240ms vs 92ms/call) — still fast enough for the game.
         self.headless = headless
@@ -115,27 +127,52 @@ class KorovaAgent:
         # missile clears the bunkers. Trigger the dodge well before that.
         self.dodge_trigger_y = dodge_trigger_y
         self.dodge_radius = dodge_radius
+        # When set, records the session to a .webm file in this directory
+        # (Playwright's native format — see record_to_mp4() to convert).
+        self.record_video_dir = record_video_dir
+        self.video_path: str | None = None  # set in __exit__ once finalized
         self._current_target: str | None = None
         self._current_target_x: float | None = None  # for drift-tolerant persistence
         self._start_lives: int | None = None
         self._pw = None
         self._browser = None
+        self._context = None
         self._page: Page | None = None
 
     # ---------- lifecycle ----------
     def __enter__(self) -> "KorovaAgent":
         self._pw = sync_playwright().start()
         self._browser = self._pw.chromium.launch(headless=self.headless)
-        self._page = self._browser.new_page(viewport={"width": 1280, "height": 900})
+        viewport = {"width": 1280, "height": 900}
+        if self.record_video_dir:
+            self._context = self._browser.new_context(
+                viewport=viewport,
+                record_video_dir=self.record_video_dir,
+                record_video_size=viewport,
+            )
+            self._page = self._context.new_page()
+        else:
+            self._page = self._browser.new_page(viewport=viewport)
         return self
 
     def __exit__(self, *exc) -> None:
         try:
-            if self._browser:
-                self._browser.close()
+            if self._page and self.record_video_dir:
+                video = self._page.video
+                self._page.close()  # video only finalizes once its page closes
+                if video:
+                    self.video_path = video.path()
         finally:
-            if self._pw:
-                self._pw.stop()
+            try:
+                if self._context:
+                    self._context.close()
+            finally:
+                try:
+                    if self._browser:
+                        self._browser.close()
+                finally:
+                    if self._pw:
+                        self._pw.stop()
 
     @property
     def page(self) -> Page:
@@ -636,6 +673,8 @@ class KorovaAgent:
 
 if __name__ == "__main__":
     import argparse
+    import shutil
+    import tempfile
     ap = argparse.ArgumentParser()
     ap.add_argument("--seconds", type=float, default=30)
     ap.add_argument("--headless", action="store_true")
@@ -643,10 +682,21 @@ if __name__ == "__main__":
     ap.add_argument("--aggression", type=float, default=0.5,
                     help="0.0=pure survival .. 1.0=pure score (default 0.5); "
                          "scaled down automatically as lives are lost")
+    ap.add_argument("--record", metavar="FILE.mp4",
+                    help="record the session and save it as an mp4 (requires ffmpeg on PATH)")
     args = ap.parse_args()
+    video_dir = tempfile.mkdtemp(prefix="korova_video_") if args.record else None
     with KorovaAgent(headless=not args.headless,
                      policy="baseline" if args.baseline else "model",
-                     aggression=args.aggression) as agent:
+                     aggression=args.aggression,
+                     record_video_dir=video_dir) as agent:
         r = agent.play(seconds=args.seconds)
         print(f"\nscore={r.score} lives={r.lives} ticks={r.ticks} "
               f"model_calls={r.model_calls} shots={r.shots} error={r.error!r}")
+    if args.record:
+        if agent.video_path:
+            record_to_mp4(agent.video_path, args.record)
+            print(f"recorded: {args.record}")
+        else:
+            print("recording failed: no video was captured")
+        shutil.rmtree(video_dir, ignore_errors=True)

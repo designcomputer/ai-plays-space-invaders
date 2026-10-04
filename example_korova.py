@@ -12,8 +12,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import shutil
+import tempfile
 
-from invaders_korova import KorovaAgent
+from invaders_korova import KorovaAgent, record_to_mp4
 
 
 def main() -> None:
@@ -26,6 +28,8 @@ def main() -> None:
     ap.add_argument("--aggression", type=float, default=0.5,
                     help="0.0=pure survival .. 1.0=pure score (default 0.5); "
                          "scaled down automatically as lives are lost")
+    ap.add_argument("--record", metavar="FILE.mp4",
+                    help="record the session and save it as an mp4 (requires ffmpeg on PATH)")
     args = ap.parse_args()
 
     policy = "baseline" if args.baseline else "model"
@@ -38,8 +42,9 @@ def main() -> None:
           "bunker gaps, switches columns as it clears them, and breaks off to\n"
           "dodge incoming missiles mid-aim.\n")
 
+    video_dir = tempfile.mkdtemp(prefix="korova_video_") if args.record else None
     with KorovaAgent(headless=args.headless, policy=policy,
-                      aggression=args.aggression) as agent:
+                      aggression=args.aggression, record_video_dir=video_dir) as agent:
         r = agent.play(seconds=args.seconds)
 
     print("\n=== RESULT ===")
@@ -48,6 +53,14 @@ def main() -> None:
     print(f"missiles:    {r.shots}")
     print(f"model calls: {r.model_calls}")
     print(f"error:       {r.error!r}")
+
+    if args.record:
+        if agent.video_path:
+            record_to_mp4(agent.video_path, args.record)
+            print(f"recorded:    {args.record}")
+        else:
+            print("recording failed: no video was captured")
+        shutil.rmtree(video_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
