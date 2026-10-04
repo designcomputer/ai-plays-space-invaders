@@ -5,6 +5,18 @@ in a real browser. A small language model makes high-level decisions (which
 column to focus on), while deterministic code handles the fast work of aiming,
 firing, and dodging.
 
+**Purpose:** this project demonstrates using open-source decision models served
+through [Ollama](https://ollama.com), applied to a real-time game. The
+approach is inspired by Jev's constrained-decision style, where a model picks
+one option from a list the code offers rather than generating open-ended output.
+The game is a demo target, not the point: the same pattern applies to any task
+that needs fast control loops with occasional model input.
+
+## Demo
+
+A 23-second clip of the agent playing, with the game's sound:
+[▶ Watch the demo (docs/demo.mp4)](docs/demo.mp4)
+
 ## Quick start
 
 Requirements: Python 3.11+, and a [System One](#decision-model)-compatible
@@ -111,3 +123,9 @@ server-side error (`non-finite logit`) on every request on the test server.
 - The bottom-row danger line (`INVADER_DANGER_Y`) and dodge thresholds are
   heuristics. The game's exact loss threshold is not known here.
 - Tested on Windows 11 with Chromium via Playwright.
+
+## Credits
+
+Space Invaders is played on [Korovatron](https://www.korovatron.co.uk/spaceinvaders/),
+the author's site. This project only plays the game and does not include or
+redistribute its code or assets. Please visit the site and support the author's work.
