@@ -70,22 +70,42 @@ The model only chooses among columns the code offers, so its output is always
 a valid target. Most turns the model is not consulted at all: the agent keeps
 its current column until it is cleared, blocked, or threatened.
 
+### How the game is lost
+
+In practice the agent loses because the invaders land, not because it runs
+out of lives. Each time the fleet bounces off a screen edge it drops 32px, and
+the game ends when an invader reaches y=864. Wave 1's bottom row starts at
+y=448, which gives 13 drops. Clearing a bottom row adds 2 more, and a narrower
+fleet bounces less often. The strategy is built around these two levers.
+
 ### Strategy
 
-- **Focus fire.** A bullet hits the lowest invader in a column first, so the
-  agent clears columns bottom-to-top.
-- **Bunker awareness.** Four destructible bunkers block shots. Each column is
-  marked reachable or blocked, and the agent prefers reachable ones.
-- **Slow the descent.** While the fleet is wide, clear the outer columns first.
-  The fleet drops a row each time it bounces off a screen edge, so shrinking
-  its width buys time. Covered outer columns (with a bunker beneath) are
-  preferred.
-- **Bottom-row urgency.** A column whose lowest invader nears the bottom
-  overrides everything else, since reaching the bottom ends the game. The agent
-  will fire through a bunker if that is the only path.
-- **UFO.** Tracked as soon as it appears. Fired on only when a shot can reach it:
-  no bunker and no surviving invader in the way. Lead is computed from the
-  UFO's exposed velocity, so the shot lands where the UFO will be.
+- **Edges first.** While the fleet is high, the agent clears the outer
+  columns. A narrower fleet takes longer to reach a wall, so it drops less
+  often.
+- **Bottom row once the fleet is low.** Once the lowest row passes a warning
+  line (6 drops left), the agent works along that row instead of clearing one
+  column to the top.
+- **Emergency override.** A column 3 drops from landing overrides everything
+  else, including the UFO. The agent will fire through a bunker if that is the
+  only path. If it has a life to spare, it stops dodging so it can keep firing.
+- **Column labels for the model.** Each column the model can pick is tagged
+  EDGE, NEAR-EDGE or BOTTOM, with a height band (high, mid, LOW, CRITICAL), a
+  depth, and the travel distance from the cannon. The prompt is a short
+  numbered priority list. Blocked columns are not offered.
+- **End-game ambush.** At 22 or fewer invaders the fleet speeds up, and
+  chasing a column gets slow and inaccurate. The cannon parks at the nearest
+  clear spot that some invader will sweep over, and fires when an invader's
+  predicted position will be over the muzzle after the bullet's flight time.
+- **Targets of opportunity.** While travelling or dodging, the cannon fires
+  at any invader that passes directly overhead.
+- **Bunker awareness.** Four destructible bunkers block shots. Clearance is
+  checked where the bullet actually travels, at the muzzle. The game removes
+  the bunkers once invaders reach y=736, and the agent treats every shot as
+  clear from then on.
+- **UFO.** Tracked only while a shot can reach it: no bunker and no surviving
+  invader in the way. Lead is computed from the UFO's exposed velocity.
+  Ignored once the fleet is low.
 - **Fleet lead.** A bullet takes real time to reach a tall column, and the fleet
   drifts or reverses during that flight. The agent estimates fleet velocity from
   recent samples and aims at the predicted position.
@@ -104,7 +124,18 @@ The model is reached through a System One endpoint (`POST /v1/systemone`).
 `systemone.py` is a small client for it. Model choice is set with `--model`
 or `SpaceInvadersAgent(model=...)`.
 
-Models tested on a local server, five runs each, 300s cap, default aggression:
+Current results with clef:27b on a local server, 10 games, 300s cap, default
+aggression. Kills (out of 55 in wave 1) measure progress toward wave 2
+better than score, which UFO hits inflate.
+
+| Model | Mean kills | Kill range | Mean score | Mean lives left | Model calls / game |
+|---|---|---|---|---|---|
+| clef:27b | 44.3 | 39–49 | 741 | 2.8 | ~22 |
+
+No game has cleared wave 1 yet. Every game ended with the invaders landing.
+
+Earlier results, from a previous version of the agent with a different
+prompt and strategy (five runs each, score only):
 
 | Model | Mean score | Range | Mean lives left | Model calls / game |
 |---|---|---|---|---|
@@ -127,8 +158,10 @@ server-side error (`non-finite logit`) on every request on the test server.
 
 - The game is a third-party page, and this code reads its JavaScript globals.
   If the site changes its internals, the agent will need updating.
-- The bottom-row danger line (`INVADER_DANGER_Y`) and dodge thresholds are
-  heuristics. The game's exact loss threshold is not known here.
+- The landing line, drop size and shield cutoff come from the game's
+  `main.js`. The warning and danger lines (`INVADER_WARN_Y`,
+  `INVADER_DANGER_Y`), the ambush threshold (`AMBUSH_FLEET`) and the dodge
+  thresholds are tuned heuristics.
 - Tested on Windows 11 with Chromium via Playwright.
 
 ## Credits

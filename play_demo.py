@@ -2,7 +2,8 @@
 
 The agent reads the game's full state from JavaScript globals (no canvas pixel
 analysis), computes which columns are reachable through the four destructible
-bunkers, and uses focus fire (clear one column bottom-to-top, then the next).
+bunkers, clears the fleet's edges and then its bottom row to delay the
+landing, and parks to time its shots once only a few fast invaders remain.
 
 Usage:
     python play_demo.py                 # model policy, 60s, headed
@@ -38,11 +39,12 @@ def main() -> None:
     print(f"=== Space Invaders AI — policy={policy}, model={args.model}, "
           f"{args.seconds:.0f}s, headless={args.headless}, "
           f"aggression={args.aggression} ===")
-    print("Strategy: focus fire (clear a column bottom-to-top, value-weighted) "
-          "+ bunker reachability + UFO priority + reactive dodge.")
-    print("Watch the window: the cannon chases one column, firing through the\n"
-          "bunker gaps, switches columns as it clears them, and breaks off to\n"
-          "dodge incoming missiles mid-aim.\n")
+    print("Strategy: clear edge columns while the fleet is high, then the "
+          "bottom row once it is low; park and time shots in the end-game.")
+    print("Watch the window: the cannon works the outer columns first, firing\n"
+          "through the bunker gaps, switches to the lowest row as the fleet\n"
+          "nears the bottom, and parks to ambush the last fast invaders. It\n"
+          "breaks off to dodge incoming missiles mid-aim.\n")
 
     video_dir = tempfile.mkdtemp(prefix="space_invaders_video_") if args.record else None
     with SpaceInvadersAgent(headless=args.headless, policy=policy, model=args.model,
