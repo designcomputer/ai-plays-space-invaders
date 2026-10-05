@@ -130,19 +130,23 @@ The model is reached through a System One endpoint (`POST /v1/systemone`).
 `systemone.py` is a small client for it. Model choice is set with `--model`
 or `SpaceInvadersAgent(model=...)`.
 
-Current results with clef:27b on a local server, 5 games, 300s cap, default
+Current results on a local server, 5 games per model, 300s cap, default
 aggression. Each wave has 55 invaders. Kills measure progress better than
 score, which UFO hits inflate.
 
-| Model | Waves cleared | Highest level | Mean kills | Kill range | Mean score | Mean lives left | Model calls / game |
+| Model | Cleared wave 1 | Levels reached | Mean kills | Kill range | Mean score | Mean lives left | Model calls / game |
 |---|---|---|---|---|---|---|---|
-| clef:27b | 4 of 5 games cleared wave 1 | 5 | 183 | 47–264 | 3348 | 2.8 | ~43 |
+| clef:27b | 4 of 5 | 4, 5, 1, 5, 3 | 183 | 47–264 | 3348 | 2.8 | ~43 |
+| nimble:9b | 5 of 5 | 3, 2, 2, 3, 4 | 146 | 102–210 | 2632 | 2.8 | ~33 |
+| tev1:4b | 5 of 5 | 2, 3, 3, 2, 2 | 119 | 98–153 | 2208 | 2.6 | ~25 |
 
-Levels reached in the 5 games: 4, 5, 1, 5, 3. Results vary a lot from game to
-game, and the one failure ended with the invaders landing in wave 1.
+Larger models tended to go further, but the ranges overlap and clef:27b was
+the most variable: it reached level 5 twice and was also the only model to
+lose in wave 1. Every game that ended before the 300s cap ended with the
+invaders landing, not with the agent out of lives.
 
-Before the held-fire-key fix, the same strategy averaged 44.3 kills (range
-39–49, 10 games) and never cleared wave 1.
+Before the held-fire-key fix, clef:27b averaged 44.3 kills (range 39–49, 10
+games) with the same strategy and never cleared wave 1.
 
 Earlier results, from a previous version of the agent with a different
 prompt and strategy (five runs each, score only):
