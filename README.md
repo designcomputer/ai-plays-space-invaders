@@ -134,12 +134,20 @@ Current results on a local server, 5 games per model, 300s cap, default
 aggression. Each wave has 55 invaders. Kills measure progress better than
 score, which UFO hits inflate.
 
-| Model | Cleared wave 1 | Levels reached | Mean kills | Kill range | Mean score | Mean lives left | Model calls / game |
-|---|---|---|---|---|---|---|---|
-| clef:27b | 4 of 5 | 4, 5, 1, 5, 3 | 183 | 47–264 | 3348 | 2.8 | ~43 |
-| nimble:9b | 5 of 5 | 3, 2, 2, 3, 4 | 146 | 102–210 | 2632 | 2.8 | ~33 |
-| clef-flash:9b | 5 of 5 | 2, 3, 3, 3, 2 | 132 | 96–158 | 2522 | 2.6 | ~33 |
-| tev1:4b | 5 of 5 | 2, 3, 3, 2, 2 | 119 | 98–153 | 2208 | 2.6 | ~25 |
+| Model | Cleared wave 1 | Levels reached | Mean kills | Kill range | Mean score | Mean lives left | Model calls / game | Response time |
+|---|---|---|---|---|---|---|---|---|
+| clef:27b | 4 of 5 | 4, 5, 1, 5, 3 | 183 | 47–264 | 3348 | 2.8 | ~43 | ~345 ms |
+| nimble:9b | 5 of 5 | 3, 2, 2, 3, 4 | 146 | 102–210 | 2632 | 2.8 | ~33 | ~91 ms |
+| clef-flash:9b | 5 of 5 | 2, 3, 3, 3, 2 | 132 | 96–158 | 2522 | 2.6 | ~33 | ~252 ms |
+| tev1:4b | 5 of 5 | 2, 3, 3, 2, 2 | 119 | 98–153 | 2208 | 2.6 | ~25 | ~90 ms |
+
+Response time is the median of 10 decision calls with the agent's real prompt
+and a captured game state, measured from the client to the model server over
+the local network, with the model already loaded. The first call after a model
+loads takes 4–6 s; the agent keeps the model loaded for 30 minutes, so this
+happens at most once per game. The game keeps running while the model decides,
+so at about 43 decisions per game clef:27b spends roughly 15 s waiting on the
+model, against about 3 s for nimble:9b.
 
 Larger models tended to go further, but the ranges overlap and clef:27b was
 the most variable: it reached level 5 twice and was also the only model to
