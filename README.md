@@ -138,6 +138,7 @@ score, which UFO hits inflate.
 |---|---|---|---|---|---|---|---|
 | clef:27b | 4 of 5 | 4, 5, 1, 5, 3 | 183 | 47–264 | 3348 | 2.8 | ~43 |
 | nimble:9b | 5 of 5 | 3, 2, 2, 3, 4 | 146 | 102–210 | 2632 | 2.8 | ~33 |
+| clef-flash:9b | 5 of 5 | 2, 3, 3, 3, 2 | 132 | 96–158 | 2522 | 2.6 | ~33 |
 | tev1:4b | 5 of 5 | 2, 3, 3, 2, 2 | 119 | 98–153 | 2208 | 2.6 | ~25 |
 
 Larger models tended to go further, but the ranges overlap and clef:27b was
@@ -157,8 +158,10 @@ prompt and strategy (five runs each, score only):
 | tev1:4b | 894 | 740–1170 | 2.8 | ~78 |
 | nimble:9b | 922 | 580–1310 | 2.8 | ~41 |
 
-Small samples; treat these as a rough guide. `clef-flash:9b` returned a
-server-side error (`non-finite logit`) on every request on the test server.
+Small samples; treat these as a rough guide. `clef-flash:9b` is missing from
+the earlier table because it returned a server-side error (`non-finite
+logit`) on every request at the time. A fix to Ollama's Windows version
+resolved it.
 
 ## Files
 
